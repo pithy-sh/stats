@@ -1,0 +1,44 @@
+name: CI
+
+# The card's three gates, on every pull request and every push to main, so a required Gates check always reports.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: Gates
+    runs-on: ubuntu-24.04
+    # A hang backstop, well above a normal run.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: "package.json"
+
+      # The kit is an ordinary dependency here: `@pithy-sh/*` resolve from npm by the lockfile.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # Biome first: it is the fastest gate and the most common failure.
+      - name: Biome
+        run: bunx biome check .
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Both projects: node, and workers, which runs the collector Workflow in workerd against a real D1.
+      - name: Test
+        run: bun run test

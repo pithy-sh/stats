@@ -9,11 +9,12 @@ It is **a Pithy app**, built on the kit it measures, exactly as an adopter would
 ## The shape
 
 - **One Worker, `apps/api`.** No UI. A Hono router composed by `createEntrypoint` serves the JSON API.
-- **A daily Workflow does all the collecting.** A cron on its spec starts it at 02:00 UTC; it runs the fetches as steps, writes D1, then builds the JSON and writes it to R2. The instance id is the UTC date, so a day runs once. It stays triggerable by hand for backfills.
-- **D1 is internal to the Workflow.** It holds the history: one row per package per day, and the snapshots npm forgets (per-version counts keep seven days upstream). No request handler reads D1.
+- **A daily Workflow does all the collecting.** A cron on its spec starts it at 02:00 UTC; it runs the fetches as steps, writes D1, then builds the JSON and writes it to R2. The kit starts each scheduled instance under a random id, so rows are keyed by the UTC day they were captured instead: two runs on one day leave one set of rows. It stays triggerable by hand for backfills.
+- **D1 is internal to the Workflow.** It holds the history: one row per package per day, and the snapshots npm forgets (per-version counts keep seven days upstream). No request handler reads D1, and `apps/api/src/noRequestReadsD1.test.ts` fails if a module outside `collect/`, `data/` and `migrations/` names the app database.
 - **R2 holds what is served.** Each run writes `latest.json` and a dated snapshot. A request reads one R2 object and returns it.
 - **Caching is computed per request.** `Cache-Control: max-age` is the seconds from now until 02:05 UTC, plus `stale-while-revalidate`, so every copy expires when the next file is ready. The R2 object's ETag answers `If-None-Match` with a 304. Query strings are ignored, so they cannot bust anything.
 - **Upstreams see the Workflow once a day, never a visitor.** npm, the npm registry, GitHub, jsDelivr, deps.dev.
+- **Upstream tokens live in the Secrets Store.** Each is declared in `apps/api/src/secret/registry.ts`, set per environment with `bun run pithy secrets create <name> --env <env>`, and read with `secretsStore` inside the step that uses it, never returned from a step or logged. Today there is one, `github-token`.
 
 ## Toolchain
 
@@ -26,6 +27,8 @@ bun run typecheck
 bunx biome check .
 bun run test
 ```
+
+CI runs the same three after `bun install --frozen-lockfile`, on every pull request and every push to `main` (`.github/workflows/ci.yml`).
 
 ## Work
 

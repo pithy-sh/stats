@@ -7,9 +7,11 @@
   // directories that are not one yet — the ignores are stated here instead, so the first `bun run lint`
   // works before the first `git init`. `openapi.json` and `asyncapi.json` are `pithy contract`'s
   // output: generated, rewritten whenever a route or a frame changes, and never formatted by hand.
+  // `.worktrees` is anchored at this file rather than written `**/.worktrees`: a feature worktree lives under
+  // `.worktrees/`, and the unanchored form matched its own path, so `biome check .` inside one checked nothing.
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/dist", "!**/.wrangler", "!**/.worktrees", "!**/openapi.json", "!**/asyncapi.json"]
+    "includes": ["**", "!**/dist", "!**/.wrangler", "!.worktrees", "!**/openapi.json", "!**/asyncapi.json"]
   },
   // The kit's six lint safeguards, one GritQL rule each in `plugins/`, each scoped to the code it is about.
   //

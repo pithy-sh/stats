@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "stats",
+      "dependencies": {
+        "@pithy-sh/secrets": "^0.6.8",
+      },
       "devDependencies": {
         "@biomejs/biome": "2.5.8",
         "@cloudflare/vitest-plugin": "1.4.2",
@@ -16,7 +19,9 @@
     "apps/api": {
       "name": "stats-api",
       "dependencies": {
+        "@pithy-sh/cloudflare": "^0.10.3",
         "@pithy-sh/core": "^0.20.0",
+        "@pithy-sh/secrets": "^0.6.8",
         "hono": "^4.13.2",
         "kysely": "^0.29.0",
         "zod": "^4.4.0",

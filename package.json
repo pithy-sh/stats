@@ -2,6 +2,7 @@
   "name": "stats",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.4.3",
   "engines": {
     "node": ">=22"
   },
@@ -26,5 +27,8 @@
     "@types/node": "^22.15.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.0"
+  },
+  "dependencies": {
+    "@pithy-sh/secrets": "^0.6.8"
   }
 }

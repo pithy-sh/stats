@@ -13,6 +13,11 @@
 import { defineCapability } from "@pithy-sh/core/src/capability/capability";
 import { compositionEnvironment } from "@pithy-sh/core/src/env/ambient";
 import { originFor } from "@pithy-sh/core/src/naming/domains";
+import { secrets } from "@pithy-sh/secrets/src/index";
+import { COLLECT_BINDING, collectWorkflows } from "./src/collect/workflow";
+import { APP_MIGRATION_ORDER, RETAINED_TABLES, statsTables } from "./src/data/tables";
+import { STATS_MIGRATIONS } from "./src/migrations/index";
+import { statsSecretRegistry } from "./src/secret/registry";
 
 // Where this Worker answers, per environment. Declare it once here and the
 // `routes` entry and `vars.BASE_URL` in wrangler.jsonc are generated from it —
@@ -44,7 +49,24 @@ const app = defineCapability({
   name: "api",
   // Bindings your own routes need beyond what capabilities declare. Validated
   // on the first request — a missing binding fails fast with the binding's name.
-  requiredBindings: [],
+  requiredBindings: [
+    { type: "d1", name: "DB" },
+    // Declared so a Worker deployed without the binding fails naming it, not on the next 02:00.
+    { type: "workflow", name: COLLECT_BINDING },
+  ],
+  // The daily collector. Its spec's cron is what `pithy worker sync` writes into `triggers.crons`, and what
+  // `createEntrypoint`'s `scheduled` handler starts it on.
+  workflows: collectWorkflows,
+  // The collector's history. Only the Workflow reads or writes it; no route does.
+  databases: {
+    app: {
+      binding: "DB",
+      tables: statsTables,
+      migrationOrder: APP_MIGRATION_ORDER,
+      migrations: STATS_MIGRATIONS,
+      retained: RETAINED_TABLES,
+    },
+  },
   // Mount your routes here. Every route declares how callers are verified —
   // bearer, session, signed-webhook, or public — and what it returns, with
   // `describeRoute` from @pithy-sh/core/src/http/routeSpec. `pithy contract`
@@ -69,6 +91,13 @@ const config = {
   // Library capabilities this Worker composes, in order.
   // `pithy add <capability> --worker api` registers them here.
   capabilities: [
+    secrets({
+      // Every secret this app holds: the GitHub token the collector reads with. Both the Workflow's
+      // `secretsStore` and the `pithy secrets` CLI read it. See src/secret/registry.ts.
+      registry: statsSecretRegistry,
+      // How often the at-rest encryption key rotates. The secrets manager re-encrypts every stored secret on this cadence; raise it to rotate less often, lower it to rotate more aggressively.
+      rotationIntervalDays: 30,
+    }),
     // pithy:capabilities (managed region — do not remove this marker)
   ],
   app,

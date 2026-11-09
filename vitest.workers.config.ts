@@ -1,8 +1,14 @@
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
+import { devEncryptionKeys } from "@pithy-sh/secrets/src/test-utils/devEncryptionKeys";
 import { defineConfig } from "vitest/config";
 
 // The Workers-runtime project: `*.workers.test.ts` runs inside workerd, against a real D1 database and a
 // real Workflow that Miniflare creates per run and throws away after. No mocks, no fakes.
+//
+// `PUBLISHED` is the R2 bucket the publish step writes and the `/v1` routes read. A request through the Worker's
+// `fetch` passes the secrets capability's binding check first, so `SECRETS` (its database) and
+// `SECRETS_ENCRYPTION_KEYS` are bound too: `devEncryptionKeys()` mints a throwaway key per run, the shape
+// `.dev.vars` supplies locally and `pithy secrets provision` binds when deployed.
 //
 // `main` is the api Worker, because a Workflow's class resolves on the main module: the collector runs in
 // the real Workflows engine, and a test drives it through the `COLLECT` binding. `GITHUB_TOKEN` stands in
@@ -19,9 +25,10 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: "2026-06-01",
         compatibilityFlags: ["nodejs_compat"],
-        d1Databases: ["DB"],
+        d1Databases: ["DB", "SECRETS"],
+        r2Buckets: ["PUBLISHED"],
         workflows: { COLLECT: { name: "stats-test-api-collect", className: "CollectWorkflow" } },
-        bindings: { GITHUB_TOKEN: "test-github-token" },
+        bindings: { GITHUB_TOKEN: "test-github-token", SECRETS_ENCRYPTION_KEYS: devEncryptionKeys() },
       },
     }),
   ],

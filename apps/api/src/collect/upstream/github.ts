@@ -9,6 +9,8 @@ const MAX_NODES = 100_000;
 /** The most pages one connection is read across. Past it, paging is taken to be broken rather than long. */
 export const MAX_PAGES = MAX_NODES / PAGE_SIZE;
 
+const Timestamp = z.iso.datetime().transform((value) => new Date(value));
+
 function authorization(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28" };
 }
@@ -80,6 +82,7 @@ export async function contributorCount(fetcher: Fetcher, token: string, repo: st
 
 export const RepoStats = z
   .object({
+    createdAt: z.date().describe("When the repository was created."),
     stars: z.number().int().nonnegative().describe("Stargazers."),
     forks: z.number().int().nonnegative().describe("Forks."),
     commits: z.number().int().nonnegative().describe("Commits on the default branch."),
@@ -90,6 +93,7 @@ export type RepoStats = z.output<typeof RepoStats>;
 
 const REPO_QUERY = `query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
+    createdAt
     stargazerCount
     forkCount
     defaultBranchRef { target { ... on Commit { history { totalCount } } } }
@@ -100,6 +104,7 @@ const RepoData = z
   .object({
     repository: z
       .object({
+        createdAt: Timestamp.describe("When the repository was created."),
         stargazerCount: z.number().int().describe("Stargazers."),
         forkCount: z.number().int().describe("Forks."),
         defaultBranchRef: z
@@ -121,6 +126,7 @@ const RepoData = z
 export async function fetchRepoStats(fetcher: Fetcher, token: string, repo: string): Promise<RepoStats> {
   const data = await graphql(fetcher, token, REPO_QUERY, ownerAndName(repo), RepoData);
   return {
+    createdAt: data.repository.createdAt,
     stars: data.repository.stargazerCount,
     forks: data.repository.forkCount,
     commits: data.repository.defaultBranchRef?.target.history.totalCount ?? 0,
@@ -135,19 +141,15 @@ const PageInfo = z
   })
   .describe("GraphQL connection paging.");
 
-/**
- * Every node of a paged connection, asking for the next page until GitHub says there is none. Throws when a
- * page answers the cursor it was asked with, or when `MAX_PAGES` pages still leave more.
- */
-async function allPages<N extends z.ZodType>(
-  fetcher: Fetcher,
-  token: string,
-  repo: string,
-  query: string,
-  connection: "issues" | "pullRequests",
-  node: N,
-): Promise<z.output<N>[]> {
-  const Data = z
+/** One page of a GraphQL connection: its paging and its nodes. */
+interface Page<N> {
+  pageInfo: z.output<typeof PageInfo>;
+  nodes: N[];
+}
+
+/** A query's data holding one paged connection directly under the repository. */
+function repositoryConnection<N extends z.ZodType>(connection: "issues" | "pullRequests", node: N) {
+  return z
     .object({
       repository: z
         .object({
@@ -158,11 +160,27 @@ async function allPages<N extends z.ZodType>(
         .describe("The repository."),
     })
     .describe("A paged query's data.");
-  const nodes: z.output<N>[] = [];
+}
+
+/**
+ * Every node of a paged connection, asking for the next page until GitHub says there is none. `pageOf` finds the
+ * page in a query's data, or answers null when there is no connection to page. Throws when a page answers the
+ * cursor it was asked with, or when `MAX_PAGES` pages still leave more.
+ */
+async function allPages<D extends z.ZodType, N>(
+  fetcher: Fetcher,
+  token: string,
+  repo: string,
+  query: string,
+  connection: string,
+  data: D,
+  pageOf: (data: z.output<D>) => Page<N> | null,
+): Promise<N[]> {
+  const nodes: N[] = [];
   let after: string | null = null;
   for (let pages = 1; ; pages++) {
-    const data = await graphql(fetcher, token, query, { ...ownerAndName(repo), after }, Data);
-    const page = data.repository[connection] as { pageInfo: z.output<typeof PageInfo>; nodes: z.output<N>[] };
+    const page = pageOf(await graphql(fetcher, token, query, { ...ownerAndName(repo), after }, data));
+    if (page === null) return nodes;
     nodes.push(...page.nodes);
     if (!page.pageInfo.hasNextPage || page.pageInfo.endCursor === null) return nodes;
     if (page.pageInfo.endCursor === after) {
@@ -178,8 +196,6 @@ async function allPages<N extends z.ZodType>(
     after = page.pageInfo.endCursor;
   }
 }
-
-const Timestamp = z.iso.datetime().transform((value) => new Date(value));
 
 export const GitHubIssue = z
   .object({
@@ -226,7 +242,15 @@ const IssueNode = z
 
 /** Every issue on the repository, oldest first. */
 export async function fetchIssues(fetcher: Fetcher, token: string, repo: string): Promise<GitHubIssue[]> {
-  const nodes = await allPages(fetcher, token, repo, ISSUES_QUERY, "issues", IssueNode);
+  const nodes = await allPages(
+    fetcher,
+    token,
+    repo,
+    ISSUES_QUERY,
+    "issues",
+    repositoryConnection("issues", IssueNode),
+    (data) => data.repository.issues as Page<z.output<typeof IssueNode>>,
+  );
   return nodes.map((node) => ({
     number: node.number,
     createdAt: node.createdAt,
@@ -274,5 +298,72 @@ const PullRequestNode = z
 
 /** Every pull request on the repository, oldest first. */
 export async function fetchPullRequests(fetcher: Fetcher, token: string, repo: string): Promise<GitHubPullRequest[]> {
-  return allPages(fetcher, token, repo, PULL_REQUESTS_QUERY, "pullRequests", PullRequestNode);
+  return allPages(
+    fetcher,
+    token,
+    repo,
+    PULL_REQUESTS_QUERY,
+    "pullRequests",
+    repositoryConnection("pullRequests", PullRequestNode),
+    (data) => data.repository.pullRequests as Page<GitHubPullRequest>,
+  );
+}
+
+export const GitHubCommit = z
+  .object({
+    oid: z.string().describe("The commit's full SHA."),
+    committedAt: z.date().describe("When it was committed: when it landed on the branch for a squash merge."),
+  })
+  .describe("One commit on the repository's default branch.");
+export type GitHubCommit = z.output<typeof GitHubCommit>;
+
+const COMMITS_QUERY = `query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      target {
+        ... on Commit {
+          history(first: ${PAGE_SIZE}, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            nodes { oid committedDate }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const CommitNode = z
+  .object({
+    oid: z.string().describe("The commit's SHA."),
+    committedDate: Timestamp.describe("When it was committed."),
+  })
+  .describe("A commit node as GraphQL answers it.");
+
+const CommitsData = z
+  .object({
+    repository: z
+      .object({
+        defaultBranchRef: z
+          .object({
+            target: z
+              .object({
+                history: z
+                  .object({ pageInfo: PageInfo, nodes: z.array(CommitNode).describe("This page's commits.") })
+                  .describe("One page of history."),
+              })
+              .describe("The branch head commit."),
+          })
+          .nullable()
+          .describe("The default branch, or null for an empty repository."),
+      })
+      .describe("The repository."),
+  })
+  .describe("The commit history query's data.");
+
+/** Every commit reachable from the default branch, newest first. Empty for a repository with no branch. */
+export async function fetchCommits(fetcher: Fetcher, token: string, repo: string): Promise<GitHubCommit[]> {
+  const nodes = await allPages(fetcher, token, repo, COMMITS_QUERY, "commits", CommitsData, (data) => {
+    return data.repository.defaultBranchRef?.target.history ?? null;
+  });
+  return nodes.map((node) => ({ oid: node.oid, committedAt: node.committedDate }));
 }

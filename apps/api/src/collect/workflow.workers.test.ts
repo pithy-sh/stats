@@ -1,10 +1,19 @@
-import { env, introspectWorkflow, introspectWorkflowInstance } from "cloudflare:test";
+import {
+  createExecutionContext,
+  env,
+  introspectWorkflow,
+  introspectWorkflowInstance,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { currentKey, snapshotKey } from "../contract/objects";
+import { Latest, Summary } from "../contract/stats";
 import { statsDatabase, type statsTables } from "../data/tables";
 import { freshDatabase } from "../data/testing";
 import worker from "../index";
 import {
+  recordCollected,
   recordPackages,
   writeCdn,
   writeDailyDownloads,
@@ -48,6 +57,27 @@ function upstreams(downloads: (name: string, day: string) => number = () => 10, 
         },
       };
     }
+    if (query.includes("history(first")) {
+      return {
+        json: {
+          data: {
+            repository: {
+              defaultBranchRef: {
+                target: {
+                  history: {
+                    pageInfo: page,
+                    nodes: [
+                      { oid: "b".repeat(40), committedDate: "2026-09-06T00:00:00Z" },
+                      { oid: "a".repeat(40), committedDate: "2026-09-05T00:00:00Z" },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+    }
     if (query.includes("pullRequests(")) {
       return {
         json: {
@@ -76,6 +106,7 @@ function upstreams(downloads: (name: string, day: string) => number = () => 10, 
       json: {
         data: {
           repository: {
+            createdAt: "2026-09-01T00:00:00Z",
             stargazerCount: stars,
             forkCount: 4,
             defaultBranchRef: { target: { history: { totalCount: 900 } } },
@@ -91,6 +122,7 @@ function upstreams(downloads: (name: string, day: string) => number = () => 10, 
     },
     "https://registry.npmjs.org/*": {
       json: {
+        description: "A Pithy package.",
         "dist-tags": { latest: "0.2.0" },
         time: {
           created: "2026-09-05T00:00:00Z",
@@ -166,6 +198,8 @@ async function rowCounts(): Promise<Record<string, number>> {
     "issueSnapshots",
     "pullRequests",
     "pullRequestSnapshots",
+    "commits",
+    "collections",
     "cdnSnapshots",
     "cdnLatest",
     "dependentSnapshots",
@@ -204,9 +238,15 @@ describe("a full run", () => {
         registry: 6,
         "daily downloads": 6,
         "version downloads": 4,
-        github: 3,
+        github: 5,
         jsdelivr: 2,
         "deps.dev": 3,
+      },
+      published: {
+        [snapshotKey(output.capturedOn, "summary")]: expect.any(Number),
+        [snapshotKey(output.capturedOn, "latest")]: expect.any(Number),
+        "summary.json": expect.any(Number),
+        "latest.json": expect.any(Number),
       },
     });
     expect(await rowCounts()).toEqual({
@@ -222,6 +262,8 @@ describe("a full run", () => {
       issueSnapshots: 1,
       pullRequests: 1,
       pullRequestSnapshots: 1,
+      commits: 2,
+      collections: 7,
       cdnSnapshots: 2,
       cdnLatest: 2,
       dependentSnapshots: 2,
@@ -230,7 +272,15 @@ describe("a full run", () => {
       scorecardLatest: 1,
     });
     expect(await db().selectFrom("repoLatest").selectAll().execute()).toEqual([
-      { repo: "pithy-sh/pithy", capturedOn: output.capturedOn, stars: 50, forks: 4, commits: 900, contributors: 2 },
+      {
+        repo: "pithy-sh/pithy",
+        capturedOn: output.capturedOn,
+        createdAt: Date.parse("2026-09-01T00:00:00Z"),
+        stars: 50,
+        forks: 4,
+        commits: 900,
+        contributors: 2,
+      },
     ]);
   });
 
@@ -303,6 +353,7 @@ describe("a run's day and the day it captures", () => {
       core,
       {
         latestVersion: "0.1.0",
+        description: null,
         createdAt: new Date("2026-09-05T00:00:00Z"),
         versions: [{ version: "0.1.0", publishedAt: new Date("2026-09-05T00:00:00Z") }],
         unpackedSize: 10,
@@ -312,7 +363,12 @@ describe("a run's day and the day it captures", () => {
       },
       earlier,
     );
-    await writeRepo(db(), "pithy-sh/pithy", { stars: 7, forks: 1, commits: 100, contributors: 1 }, earlier);
+    await writeRepo(
+      db(),
+      "pithy-sh/pithy",
+      { createdAt: new Date("2026-09-01T00:00:00Z"), stars: 7, forks: 1, commits: 100, contributors: 1 },
+      earlier,
+    );
     await writeCdn(db(), core, { period: "month", hits: 5, bandwidth: 50, rank: null }, earlier);
     await writeDependents(
       db(),
@@ -474,5 +530,104 @@ describe("each source is its own step", () => {
     await env.COLLECT.create({ id: "no-list", params: { date: "2026-11-09" } });
     await instance.waitForStatus("errored");
     expect(stub.calls).toHaveLength(0);
+  });
+});
+
+/** The JSON object R2 holds at `key`, or null. */
+async function published(key: string): Promise<unknown> {
+  const object = await env.PUBLISHED.get(key);
+  return object === null ? null : await object.json();
+}
+
+describe("the publish step", () => {
+  test("writes summary.json, latest.json and both dated snapshots, after every source has written", async () => {
+    stubUpstreams(upstreams());
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "publish");
+    await env.COLLECT.create({ id: "publish", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("complete");
+    const { capturedOn } = (await instance.getOutput()) as { capturedOn: string };
+
+    const latest = Latest.parse(await published(currentKey("latest")));
+    const summary = Summary.parse(await published(currentKey("summary")));
+    expect(await published(snapshotKey(capturedOn, "latest"))).toEqual(latest);
+    expect(await published(snapshotKey(capturedOn, "summary"))).toEqual(summary);
+    expect((await env.PUBLISHED.get(currentKey("latest")))?.httpMetadata?.contentType).toBe(
+      "application/json; charset=utf-8",
+    );
+
+    // deps.dev is the last source step: its numbers in the file show the publish ran after it.
+    expect(latest.depsDev.dependents).toBe(4);
+    expect(latest.packages.map((row) => row.name)).toEqual(PACKAGES);
+    expect(latest.packages[0]?.description).toBe("A Pithy package.");
+    expect(latest.github).toMatchObject({ stars: 50, commits: 900, createdAt: "2026-09-01T00:00:00.000Z" });
+    expect(latest.github.commitWeeks?.reduce((total, value) => total + value, 0)).toBe(2);
+    for (const source of ["npm", "registry", "github", "jsdelivr", "depsDev", "scorecard"] as const) {
+      expect(latest.sources[source].collectedAt, source).not.toBeNull();
+    }
+    expect(latest.sources.kit.collectedAt).toBeNull();
+    expect(summary).toMatchObject({
+      asOf: "2026-11-08",
+      github: { stars: 50 },
+      releases: { packages: 2, versions: 4 },
+    });
+  });
+
+  test("still publishes when a source fails, keeping that source's last good time", async () => {
+    const before = new Date("2026-11-08T02:00:40Z");
+    await recordCollected(db(), "jsdelivr", before);
+    stubUpstreams(upstreams());
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "publish-stale");
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+      await m.mockStepError({ name: "jsdelivr" }, new Error("jsDelivr is down"));
+    });
+    await env.COLLECT.create({ id: "publish-stale", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("errored");
+
+    const latest = Latest.parse(await published(currentKey("latest")));
+    expect(latest.sources.jsdelivr.collectedAt).toBe(before.toISOString());
+    expect(latest.sources.github.collectedAt).not.toBeNull();
+    expect(latest.jsdelivr.total).toBeNull();
+  });
+
+  test("two runs on one capture day: the day's snapshot carries the second run, and is never served immutable meanwhile", async () => {
+    const serve = async (path: string): Promise<Response> => {
+      const ctx = createExecutionContext();
+      const response = await worker.fetch?.(
+        new Request(`https://stats.pithy.sh${path}`) as Request<unknown, IncomingRequestCfProperties>,
+        env as unknown as Record<string, unknown>,
+        ctx,
+      );
+      await waitOnExecutionContext(ctx);
+      if (response === undefined) throw new Error("The Worker exports no fetch handler.");
+      return response;
+    };
+
+    stubUpstreams(upstreams());
+    let capturedOn: string;
+    {
+      await using first = await introspectWorkflowInstance(env.COLLECT, "snapshot-1");
+      await env.COLLECT.create({ id: "snapshot-1", params: { date: "2026-11-09" } });
+      await first.waitForStatus("complete");
+      ({ capturedOn } = (await first.getOutput()) as { capturedOn: string });
+    }
+    const path = `/v1/snapshots/${capturedOn}/latest`;
+    const once = await serve(path);
+    expect(once.headers.get("cache-control")).not.toContain("immutable");
+    expect(Latest.parse(await once.json()).github.stars).toBe(50);
+
+    vi.restoreAllMocks();
+    stubUpstreams(upstreams(() => 42, 77));
+    {
+      await using second = await introspectWorkflowInstance(env.COLLECT, "snapshot-2");
+      await env.COLLECT.create({ id: "snapshot-2", params: { date: "2026-11-09" } });
+      await second.waitForStatus("complete");
+    }
+    // The first answer's copies expire by midnight at the latest; the edge's goes when it does.
+    await caches.default.delete(`https://stats.pithy.sh${path}`);
+    const twice = await serve(path);
+    expect(twice.headers.get("cache-control")).not.toContain("immutable");
+    expect(twice.headers.get("etag")).not.toBe(once.headers.get("etag"));
+    expect(Latest.parse(await twice.json()).github.stars).toBe(77);
   });
 });

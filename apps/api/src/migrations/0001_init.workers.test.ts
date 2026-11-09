@@ -44,9 +44,14 @@ async function primaryKey(table: string): Promise<string[]> {
     .map((row) => row.name);
 }
 
+/** Roll back every applied migration, newest first, so 0001 is the one under test. */
+async function rollbackAll(): Promise<void> {
+  while ((await rollbackMigration(env.DB, statsMigrationProvider())).length > 0) {}
+}
+
 beforeEach(async () => {
   await freshDatabase(env.DB);
-  await rollbackMigration(env.DB, statsMigrationProvider());
+  await rollbackAll();
 });
 
 describe("0001_init", () => {
@@ -80,7 +85,7 @@ describe("0001_init", () => {
 
   test("down drops every table it created", async () => {
     await runMigrations(env.DB, statsMigrationProvider());
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackAll();
     const present = await tables();
     for (const table of TABLES) expect(present, table).not.toContain(table);
   });

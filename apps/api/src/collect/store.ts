@@ -2,6 +2,8 @@ import { chunkRowsByBoundParameters } from "@pithy-sh/core/src/data/boundParamet
 import { type ExpressionBuilder, type Kysely, sql } from "kysely";
 import {
   CdnSnapshot,
+  Collection,
+  Commit,
   DailyDownload,
   DependentSnapshot,
   Issue,
@@ -16,7 +18,7 @@ import {
 } from "../data/tables";
 import type { Day } from "./day";
 import type { Dependents, Scorecard } from "./upstream/depsDev";
-import type { GitHubIssue, GitHubPullRequest, RepoStats } from "./upstream/github";
+import type { GitHubCommit, GitHubIssue, GitHubPullRequest, RepoStats } from "./upstream/github";
 import type { CdnStats } from "./upstream/jsdelivr";
 import type { RegistryFacts, DailyDownload as UpstreamDailyDownload } from "./upstream/npm";
 
@@ -146,6 +148,7 @@ export async function writeRegistry(
     packageName,
     capturedOn,
     latestVersion: facts.latestVersion,
+    description: facts.description,
     createdAt: facts.createdAt,
     versionCount: facts.versions.length,
     unpackedSize: facts.unpackedSize,
@@ -182,6 +185,17 @@ export async function writePullRequests(
 ): Promise<void> {
   const rows = pullRequests.map((pullRequest) => PullRequest.encode({ repo, ...pullRequest, capturedOn }));
   await writeSnapshots(db, "pullRequestSnapshots", "pullRequests", ["repo", "number"], rows);
+}
+
+/** Every commit on the default branch. A commit is written once and never changes, so a re-run rewrites the same rows. */
+export async function writeCommits(db: StatsDatabase, repo: string, commits: readonly GitHubCommit[]): Promise<void> {
+  const rows = commits.map((commit) => Commit.encode({ repo, ...commit }));
+  await upsertRows(db, "commits", ["repo", "oid"], rows);
+}
+
+/** That collector `step` finished without error at `at`. */
+export async function recordCollected(db: StatsDatabase, step: string, at: Date): Promise<void> {
+  await upsertRows(db, "collections", ["step"], [Collection.encode({ step, collectedAt: at })]);
 }
 
 /** One package's jsDelivr totals, dated and latest. */

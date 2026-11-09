@@ -6,12 +6,13 @@ import {
   waitOnExecutionContext,
 } from "cloudflare:test";
 import { sql } from "kysely";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { currentKey, snapshotKey } from "../contract/objects";
 import { Latest, Summary } from "../contract/stats";
 import { statsDatabase, type statsTables } from "../data/tables";
 import { freshDatabase } from "../data/testing";
 import worker from "../index";
+import { gzip, tarArchive } from "./kit/testing";
 import {
   recordCollected,
   recordPackages,
@@ -22,14 +23,41 @@ import {
   writeRepo,
   writeVersionDownloads,
 } from "./store";
-import { type StubCall, stubFetch } from "./upstream/testing";
+import { type StubAnswer, type StubCall, stubFetch } from "./upstream/testing";
 import { COLLECT_CRON } from "./workflow";
 
 const PACKAGES = ["@pithy-sh/auth", "@pithy-sh/core"];
 const TOKEN = "test-github-token";
+/** The head of the kit's `main` the stub answers, and the commit whose tarball it serves. */
+const HEAD = "c".repeat(40);
+const TARBALL_URL = `https://api.github.com/repos/pithy-sh/pithy/tarball/${HEAD}`;
 
-/** Every upstream the collector calls, answering a small, consistent kit. `downloads` sets a day's count. */
-function upstreams(downloads: (name: string, day: string) => number = () => 10, stars = 50) {
+/** A small kit: three tests in one test file and four code lines across two source files, and files never read. */
+let kitTarball: Uint8Array;
+beforeAll(async () => {
+  kitTarball = await gzip(
+    tarArchive({
+      "README.md": "# Pithy\n",
+      "packages/core/src/a.ts": "// a\nexport const a = 1;\n\nexport const b = 2;\n",
+      "packages/core/src/a.test.ts": `test("a", () => {});\nit.each([1, 2])("b %i", () => {});\ntest.todo("c");\n`,
+      "packages/ui-react/src/B.tsx": "/** B. */\nexport const B = () => <b />;\nexport default B;\n",
+      "packages/core/templates/app/src/c.ts": "const c = 3;\n",
+    }),
+  );
+});
+
+/** The kit's tarball, fresh on every request since a body is read once. */
+const tarball = (): StubAnswer => new Response(kitTarball as BodyInit, { status: 200 });
+
+/**
+ * Every upstream the collector calls, answering a small, consistent kit. `downloads` sets a day's count, and `kit`
+ * answers the tarball request.
+ */
+function upstreams(
+  downloads: (name: string, day: string) => number = () => 10,
+  stars = 50,
+  kit: () => StubAnswer = tarball,
+) {
   const graphql = (call: StubCall) => {
     const query = (JSON.parse(call.body ?? "{}") as { query: string }).query;
     const page = { hasNextPage: false, endCursor: null };
@@ -147,6 +175,10 @@ function upstreams(downloads: (name: string, day: string) => number = () => 10, 
     },
     "https://api.npmjs.org/versions/*": { json: { downloads: { "0.1.0": 3, "0.2.0": 30 } } },
     "https://api.github.com/graphql": graphql,
+    "https://api.github.com/repos/pithy-sh/pithy/git/ref/heads/main": {
+      json: { ref: "refs/heads/main", object: { sha: HEAD, type: "commit" } },
+    },
+    [TARBALL_URL]: kit,
     "https://api.github.com/repos/pithy-sh/pithy/contributors*": { json: [{}, {}] },
     "https://data.jsdelivr.com/v1/stats/packages/npm/*": {
       json: { hits: { rank: 5000, total: 77 }, bandwidth: { rank: 5100, total: 7700 } },
@@ -206,6 +238,7 @@ async function rowCounts(): Promise<Record<string, number>> {
     "dependentLatest",
     "scorecardSnapshots",
     "scorecardLatest",
+    "kitCounts",
   ] as const;
   const counts: Record<string, number> = {};
   for (const table of tables) counts[table] = await count(table);
@@ -239,6 +272,7 @@ describe("a full run", () => {
         "daily downloads": 6,
         "version downloads": 4,
         github: 5,
+        kit: 1,
         jsdelivr: 2,
         "deps.dev": 3,
       },
@@ -263,14 +297,18 @@ describe("a full run", () => {
       pullRequests: 1,
       pullRequestSnapshots: 1,
       commits: 2,
-      collections: 7,
+      collections: 8,
       cdnSnapshots: 2,
       cdnLatest: 2,
       dependentSnapshots: 2,
       dependentLatest: 2,
       scorecardSnapshots: 1,
       scorecardLatest: 1,
+      kitCounts: 1,
     });
+    expect(
+      await db().selectFrom("kitCounts").select(["repo", "capturedOn", "commit", "tests", "codeLines"]).execute(),
+    ).toEqual([{ repo: "pithy-sh/pithy", capturedOn: output.capturedOn, commit: HEAD, tests: 3, codeLines: 4 }]);
     expect(await db().selectFrom("repoLatest").selectAll().execute()).toEqual([
       {
         repo: "pithy-sh/pithy",
@@ -299,6 +337,8 @@ describe("a full run", () => {
     }
     expect(JSON.stringify(await instance.getOutput())).not.toContain(TOKEN);
     expect(JSON.stringify(await instance.waitForStepResult({ name: "github" }))).not.toContain(TOKEN);
+    expect(JSON.stringify(await instance.waitForStepResult({ name: "kit" }))).not.toContain(TOKEN);
+    expect(stub.calls.filter((call) => call.url === TARBALL_URL)).toHaveLength(1);
   });
 });
 
@@ -500,7 +540,8 @@ describe("each source is its own step", () => {
     expect(fetched("https://registry.npmjs.org/-/org/")).toBe(1);
     expect(fetched("https://api.npmjs.org/versions/")).toBe(PACKAGES.length);
     expect(fetched("https://data.jsdelivr.com/")).toBe(PACKAGES.length);
-    expect(fetched("https://api.github.com/repos/")).toBe(1);
+    expect(fetched("https://api.github.com/repos/pithy-sh/pithy/contributors")).toBe(1);
+    expect(fetched(TARBALL_URL)).toBe(1);
   });
 
   test("a source that exhausts its retries does not stop the others, and the run fails naming it", async () => {
@@ -517,6 +558,28 @@ describe("each source is its own step", () => {
     expect(await count("cdnLatest")).toBe(0);
     expect(await count("dependentLatest")).toBe(PACKAGES.length);
     expect(await count("repoLatest")).toBe(1);
+  });
+
+  test("a kit count that cannot be read fails only its own step: every other source still writes and publishes", async () => {
+    const before = new Date("2026-11-08T02:01:30Z");
+    await recordCollected(db(), "kit", before);
+    stubUpstreams(upstreams(undefined, undefined, () => ({ status: 502, json: { message: "Bad Gateway" } })));
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "kit-down");
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+    });
+    await env.COLLECT.create({ id: "kit-down", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("errored");
+
+    expect((await instance.getError()).message).toContain("kit");
+    expect(await count("kitCounts")).toBe(0);
+    expect(await count("repoLatest")).toBe(1);
+    expect(await count("cdnLatest")).toBe(PACKAGES.length);
+    expect(await count("dependentLatest")).toBe(PACKAGES.length);
+    const latest = Latest.parse(await published(currentKey("latest")));
+    expect(latest.sources.kit.collectedAt).toBe(before.toISOString());
+    expect(latest.sources.github.collectedAt).not.toBeNull();
+    expect(latest.kit).toEqual({ commit: null, countedAt: null, tests: null, codeLines: null, history: [] });
   });
 
   test("a failed package list stops the run before any per-package source", async () => {
@@ -561,10 +624,16 @@ describe("the publish step", () => {
     expect(latest.packages[0]?.description).toBe("A Pithy package.");
     expect(latest.github).toMatchObject({ stars: 50, commits: 900, createdAt: "2026-09-01T00:00:00.000Z" });
     expect(latest.github.commitWeeks?.reduce((total, value) => total + value, 0)).toBe(2);
-    for (const source of ["npm", "registry", "github", "jsdelivr", "depsDev", "scorecard"] as const) {
+    for (const source of ["npm", "registry", "github", "jsdelivr", "depsDev", "scorecard", "kit"] as const) {
       expect(latest.sources[source].collectedAt, source).not.toBeNull();
     }
-    expect(latest.sources.kit.collectedAt).toBeNull();
+    expect(latest.kit).toMatchObject({
+      commit: HEAD,
+      tests: 3,
+      codeLines: 4,
+      history: [{ date: capturedOn, commit: HEAD, tests: 3, codeLines: 4 }],
+    });
+    expect(summary.kit).toEqual({ tests: 3, codeLines: 4, commit: HEAD });
     expect(summary).toMatchObject({
       asOf: "2026-11-08",
       github: { stars: 50 },

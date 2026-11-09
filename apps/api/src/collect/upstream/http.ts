@@ -83,3 +83,21 @@ export async function requestJsonOrNull<S extends z.ZodType>(
   if (response.status === 404) return null;
   return parse(response, url, schema);
 }
+
+/**
+ * GET (or `options.method`) `url` and answer its body as a stream, for a body too large to hold: the caller reads it
+ * as it arrives. Any failure before the body starts is an `UpstreamError`.
+ */
+export async function requestStream(
+  fetcher: Fetcher,
+  url: string,
+  options: RequestOptions = {},
+): Promise<ReadableStream<Uint8Array>> {
+  const response = await send(fetcher, url, options);
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new UpstreamError({ detail: `${url} answered ${response.status}.` });
+  }
+  if (response.body === null) throw new UpstreamError({ detail: `${url} answered ${response.status} with no body.` });
+  return response.body;
+}

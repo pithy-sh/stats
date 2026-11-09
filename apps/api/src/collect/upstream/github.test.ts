@@ -2,10 +2,12 @@ import { PithyError } from "@pithy-sh/core/src/error/pithyError";
 import { describe, expect, test } from "vitest";
 import {
   contributorCount,
+  fetchBranchHead,
   fetchCommits,
   fetchIssues,
   fetchPullRequests,
   fetchRepoStats,
+  fetchTarball,
   lastPage,
   MAX_PAGES,
 } from "./github";
@@ -269,5 +271,40 @@ describe("paging a connection", () => {
     expect(error).toBeInstanceOf(PithyError);
     expect((error as PithyError).payload.detail).toContain(String(MAX_PAGES));
     expect(stub.calls).toHaveLength(MAX_PAGES);
+  });
+});
+
+describe("fetchBranchHead", () => {
+  const REF = "https://api.github.com/repos/pithy-sh/pithy/git/ref/heads/main";
+
+  test("resolves the branch to the full SHA of its head commit, with the token", async () => {
+    const sha = "c".repeat(40);
+    const stub = stubFetch({ [REF]: { json: { ref: "refs/heads/main", object: { sha, type: "commit" } } } });
+    expect(await fetchBranchHead(stub.fetch, TOKEN, "pithy-sh/pithy", "main")).toBe(sha);
+    expect(stub.calls[0]?.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+  });
+
+  test("throws when the answer is not a full SHA", async () => {
+    const stub = stubFetch({ [REF]: { json: { object: { sha: "abc123", type: "commit" } } } });
+    const error = await fetchBranchHead(stub.fetch, TOKEN, "pithy-sh/pithy", "main").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PithyError);
+  });
+
+  test("throws when the branch does not exist", async () => {
+    const stub = stubFetch({ [REF]: { status: 404, json: { message: "Not Found" } } });
+    const error = await fetchBranchHead(stub.fetch, TOKEN, "pithy-sh/pithy", "main").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PithyError);
+  });
+});
+
+describe("fetchTarball", () => {
+  test("streams that commit's tarball through the API, with the token", async () => {
+    const sha = "d".repeat(40);
+    const stub = stubFetch({
+      [`https://api.github.com/repos/pithy-sh/pithy/tarball/${sha}`]: new Response("gzipped tar", { status: 200 }),
+    });
+    const body = await fetchTarball(stub.fetch, TOKEN, "pithy-sh/pithy", sha);
+    expect(await new Response(body).text()).toBe("gzipped tar");
+    expect(stub.calls[0]?.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
   });
 });

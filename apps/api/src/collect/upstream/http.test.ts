@@ -1,7 +1,7 @@
 import { PithyError } from "@pithy-sh/core/src/error/pithyError";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
-import { requestJson, requestJsonOrNull, requestJsonWithHeaders, USER_AGENT } from "./http";
+import { requestJson, requestJsonOrNull, requestJsonWithHeaders, requestStream, USER_AGENT } from "./http";
 import { stubFetch } from "./testing";
 
 const Shape = z.object({ n: z.number().describe("A number.") }).describe("A test body.");
@@ -82,5 +82,31 @@ describe("requestJsonWithHeaders", () => {
     const answer = await requestJsonWithHeaders(stub.fetch, "https://up.test/a", Shape);
     expect(answer.data).toEqual({ n: 3 });
     expect(answer.headers.get("link")).toBe('<x>; rel="last"');
+  });
+});
+
+describe("requestStream", () => {
+  test("answers the body as a stream, sending the user agent and the headers given", async () => {
+    const stub = stubFetch({ "https://up.test/a.tgz": new Response("archive bytes", { status: 200 }) });
+    const body = await requestStream(stub.fetch, "https://up.test/a.tgz", { headers: { authorization: "Bearer t" } });
+    expect(await new Response(body).text()).toBe("archive bytes");
+    expect(stub.calls[0]?.headers.get("user-agent")).toBe(USER_AGENT);
+    expect(stub.calls[0]?.headers.get("authorization")).toBe("Bearer t");
+  });
+
+  test("throws an upstream error naming the URL and status on a non-2xx answer, and never the headers", async () => {
+    const stub = stubFetch({ "https://up.test/a.tgz": { status: 404, json: { message: "Not Found" } } });
+    const error = await requestStream(stub.fetch, "https://up.test/a.tgz", {
+      headers: { authorization: "Bearer secret-token" },
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PithyError);
+    expect((error as PithyError).payload.detail).toContain("404");
+    expect(JSON.stringify((error as PithyError).payload)).not.toContain("secret-token");
+  });
+
+  test("throws when a 2xx answer has no body", async () => {
+    const stub = stubFetch({ "https://up.test/a.tgz": new Response(null, { status: 204 }) });
+    const error = await requestStream(stub.fetch, "https://up.test/a.tgz").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(PithyError);
   });
 });

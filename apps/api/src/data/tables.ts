@@ -177,6 +177,21 @@ export const ScorecardSnapshot = z
   .describe("A repository's OpenSSF Scorecard on one capture day, in `scorecard_snapshots` and `scorecard_latest`.");
 export type ScorecardSnapshot = z.output<typeof ScorecardSnapshot>;
 
+export const KitCount = z
+  .object({
+    repo: Repo,
+    capturedOn: CapturedOn,
+    commit: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .describe("The full SHA of the commit counted: the head of the default branch when the step ran."),
+    tests: Count.describe("`it(` and `test(` calls in the test files under `packages/*/src/`."),
+    codeLines: Count.describe("Lines holding code in the non-test files under `packages/*/src/`."),
+    countedAt: SQLiteDate.describe("When the step counted it."),
+  })
+  .describe("The kit counted at one commit on one capture day, in `kit_counts`. A re-run of the day replaces it.");
+export type KitCount = z.output<typeof KitCount>;
+
 /** Where this app's migrations sort within the app database: after every composed capability's. */
 export const APP_MIGRATION_ORDER = 2000;
 
@@ -202,11 +217,13 @@ export const statsTables = {
   dependentLatest: DependentSnapshot,
   scorecardSnapshots: ScorecardSnapshot,
   scorecardLatest: ScorecardSnapshot,
+  kitCounts: KitCount,
 };
 
 /**
  * The tables whose rows exist nowhere else once an upstream's window has passed: npm keeps eighteen months
- * of daily downloads and seven days of per-version counts, and no upstream keeps yesterday's snapshot.
+ * of daily downloads and seven days of per-version counts, no upstream keeps yesterday's snapshot, and the kit's
+ * counts are kept by the day they were taken, which its history does not record.
  */
 export const RETAINED_TABLES = [
   "dailyDownloads",
@@ -218,6 +235,7 @@ export const RETAINED_TABLES = [
   "cdnSnapshots",
   "dependentSnapshots",
   "scorecardSnapshots",
+  "kitCounts",
 ] as const satisfies readonly (keyof typeof statsTables)[];
 
 export type StatsDatabase = Kysely<DatabaseSchema<typeof statsTables>>;

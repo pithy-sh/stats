@@ -7,6 +7,7 @@ import {
   DailyDownload,
   DependentSnapshot,
   Issue,
+  KitCount,
   Package,
   PullRequest,
   RegistrySnapshot,
@@ -17,6 +18,7 @@ import {
   VersionPublish,
 } from "../data/tables";
 import type { Day } from "./day";
+import type { KitCounts } from "./kit/count";
 import type { Dependents, Scorecard } from "./upstream/depsDev";
 import type { GitHubCommit, GitHubIssue, GitHubPullRequest, RepoStats } from "./upstream/github";
 import type { CdnStats } from "./upstream/jsdelivr";
@@ -229,4 +231,17 @@ export async function writeScorecard(
 ): Promise<void> {
   const row = ScorecardSnapshot.encode({ repo, capturedOn, ...scorecard });
   await writeSnapshots(db, "scorecardSnapshots", "scorecardLatest", ["repo"], [row]);
+}
+
+/** The kit's counts at `commit`, taken at `countedAt` on `capturedOn`. A second count on that day replaces the first. */
+export async function writeKitCount(
+  db: StatsDatabase,
+  repo: string,
+  commit: string,
+  counts: KitCounts,
+  capturedOn: Day,
+  countedAt: Date,
+): Promise<void> {
+  const row = KitCount.encode({ repo, capturedOn, commit, ...counts, countedAt });
+  await upsertRows(db, "kitCounts", ["repo", "capturedOn"], [row]);
 }

@@ -13,6 +13,7 @@ import type {
   DailyDownload,
   DependentSnapshot,
   Issue,
+  KitCount,
   PullRequest,
   RegistrySnapshot,
   RepoSnapshot,
@@ -52,6 +53,8 @@ export interface PublishRows {
   dependents: readonly DependentSnapshot[];
   scorecard: ScorecardSnapshot | null;
   collections: readonly Collection[];
+  /** The kit's counts for the repository, one per capture day. */
+  kitCounts: readonly KitCount[];
 }
 
 /** The repository every GitHub figure is about. */
@@ -61,7 +64,7 @@ export interface PublishSubject {
 
 /**
  * Which collector steps each source's freshness is made of, by their keys in `STEPS`. A source made of several is
- * as fresh as its stalest. `kit` has none until its numbers are collected, so it stays null.
+ * as fresh as its stalest.
  */
 export const SOURCE_STEPS: Readonly<Record<Source, readonly string[]>> = {
   npm: ["packages", "dailyDownloads", "versionDownloads"],
@@ -70,7 +73,7 @@ export const SOURCE_STEPS: Readonly<Record<Source, readonly string[]>> = {
   jsdelivr: ["jsdelivr"],
   depsDev: ["depsDev"],
   scorecard: ["depsDev"],
-  kit: [],
+  kit: ["kit"],
 };
 
 /** How many days back jsDelivr's `month` window starts from its capture day. */
@@ -266,6 +269,25 @@ function jsdelivrFigures(cdn: readonly CdnSnapshot[]): Latest["jsdelivr"] {
   };
 }
 
+/** The kit's newest count and every day counted, oldest first; null figures and no history before its first count. */
+function kitFigures(counts: readonly KitCount[]): Latest["kit"] {
+  const history = [...counts].sort((a, b) => (a.capturedOn < b.capturedOn ? -1 : a.capturedOn > b.capturedOn ? 1 : 0));
+  const newest = history[history.length - 1];
+  if (newest === undefined) return { commit: null, countedAt: null, tests: null, codeLines: null, history: [] };
+  return {
+    commit: newest.commit,
+    countedAt: iso(newest.countedAt),
+    tests: newest.tests,
+    codeLines: newest.codeLines,
+    history: history.map((row) => ({
+      date: row.capturedOn,
+      commit: row.commit,
+      tests: row.tests,
+      codeLines: row.codeLines,
+    })),
+  };
+}
+
 /** The last complete day of npm downloads held, or the day before `now` when none is. */
 function asOfDay(rows: PublishRows, now: Date): Day {
   const days = rows.dailyDownloads.map((row) => row.day);
@@ -301,7 +323,7 @@ export function buildLatest(rows: PublishRows, subject: PublishSubject, now: Dat
       score: rows.scorecard?.score ?? null,
       checkedAt: rows.scorecard ? utcDay(rows.scorecard.scoredAt) : null,
     },
-    kit: { commit: null, countedAt: null, tests: null, codeLines: null, history: [] },
+    kit: kitFigures(rows.kitCounts),
   };
 }
 

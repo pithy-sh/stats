@@ -75,15 +75,31 @@
       },
       "version_metadata": { "binding": "CF_VERSION_METADATA" },
       "d1_databases": [
-        { "binding": "SECRETS", "database_name": "stats-staging-secrets" },
-        { "binding": "DB", "database_name": "stats-staging-db" }
+        {
+          "binding": "SECRETS",
+          "database_name": "stats-staging-secrets",
+          "database_id": "2a169cf1-0223-4302-a757-dd1192593560"
+        },
+        { "binding": "DB", "database_name": "stats-staging-db", "database_id": "24f90d45-3f32-475c-85f5-6f7dfd24d16c" }
       ],
       "kv_namespaces": [],
-      "r2_buckets": [{ "binding": "PUBLISHED" }],
+      "r2_buckets": [{ "binding": "PUBLISHED", "bucket_name": "stats-staging-published" }],
       "workflows": [{ "binding": "COLLECT", "name": "stats-staging-api-collect", "class_name": "CollectWorkflow" }],
       "triggers": { "crons": ["0 2 * * *"] },
       "routes": [{ "pattern": "stats-staging.pithy.sh", "custom_domain": true, "zone_name": "pithy.sh" }],
-      "workers_dev": false
+      "workers_dev": false,
+      "secrets_store_secrets": [
+        {
+          "binding": "SECRETS_ENCRYPTION_KEYS",
+          "store_id": "b52f80e7453f4abeabc6de9528a11edb",
+          "secret_name": "stats-staging-secrets-encryption-keys"
+        },
+        {
+          "binding": "GITHUB_TOKEN",
+          "store_id": "b52f80e7453f4abeabc6de9528a11edb",
+          "secret_name": "stats-staging-github-token"
+        }
+      ]
     },
     "prod": {
       "name": "stats-prod-api",
@@ -95,15 +111,31 @@
       },
       "version_metadata": { "binding": "CF_VERSION_METADATA" },
       "d1_databases": [
-        { "binding": "SECRETS", "database_name": "stats-prod-secrets" },
-        { "binding": "DB", "database_name": "stats-prod-db" }
+        {
+          "binding": "SECRETS",
+          "database_name": "stats-prod-secrets",
+          "database_id": "4e13f970-c445-4160-8a42-7657552aa9fc"
+        },
+        { "binding": "DB", "database_name": "stats-prod-db", "database_id": "3ccbe372-db4b-4721-b275-cbd43ea2be3f" }
       ],
       "kv_namespaces": [],
-      "r2_buckets": [{ "binding": "PUBLISHED" }],
+      "r2_buckets": [{ "binding": "PUBLISHED", "bucket_name": "stats-prod-published" }],
       "workflows": [{ "binding": "COLLECT", "name": "stats-prod-api-collect", "class_name": "CollectWorkflow" }],
       "triggers": { "crons": ["0 2 * * *"] },
       "routes": [{ "pattern": "stats.pithy.sh", "custom_domain": true, "zone_name": "pithy.sh" }],
-      "workers_dev": false
+      "workers_dev": false,
+      "secrets_store_secrets": [
+        {
+          "binding": "SECRETS_ENCRYPTION_KEYS",
+          "store_id": "b52f80e7453f4abeabc6de9528a11edb",
+          "secret_name": "stats-prod-secrets-encryption-keys"
+        },
+        {
+          "binding": "GITHUB_TOKEN",
+          "store_id": "b52f80e7453f4abeabc6de9528a11edb",
+          "secret_name": "stats-prod-github-token"
+        }
+      ]
     }
   },
   "workflows": [{ "binding": "COLLECT", "name": "stats-dev-api-collect", "class_name": "CollectWorkflow" }],

@@ -1,0 +1,24 @@
+{
+  "name": "stats-api",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --config wrangler.jsonc --env= --experimental-provision=false",
+    "deploy:staging": "wrangler deploy --config wrangler.jsonc --env staging --experimental-provision=false",
+    "deploy:prod": "wrangler deploy --config wrangler.jsonc --env prod --experimental-provision=false"
+  },
+  "dependencies": {
+    "@pithy-sh/core": "^0.20.0",
+    "hono": "^4.13.2",
+    "kysely": "^0.29.0",
+    "zod": "^4.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "wrangler": "4.151.0"
+  }
+}

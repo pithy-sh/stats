@@ -1,0 +1,26 @@
+{
+  // Matches the Pithy toolchain defaults: strict, ESM-only, TS-7 ready.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "types": ["@cloudflare/workers-types"],
+    // Referenced from the root solution file, which requires `composite` — and `composite` makes tsc
+    // write build state. It goes under the PROJECT's `dist/`, already gitignored, and deliberately not
+    // under this Worker's: once this Worker carries a UI, Vite owns `apps/<worker>/dist` and empties it
+    // on every build, which would throw the incremental state away each time.
+    "composite": true,
+    "tsBuildInfoFile": "../../dist/api.server.tsbuildinfo",
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "pithy.config.ts"]
+}

@@ -1,0 +1,87 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stats-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Workers Logs, on by default. Every `c.var.log` record is a structured, per-line entry you can
+  // query in the dashboard — no setup. `head_sampling_rate` keeps 100% of records; lower it (0-1) to
+  // sample under heavy traffic. To fan records to a tail-consumer or Logpush, add `tail_consumers`
+  // here and attach a transport to the logger (see docs/LOGGING.md).
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // The deployed version of this Worker, injected by Cloudflare.
+  // It answers the first question anyone asks when a deploy goes wrong: which build produced this?
+  // The id reaches five places from here — the `version` field on every log record, the
+  // control-plane manifest, a header on every control-plane response, every audit event, and the
+  // check `pithy deploy` runs to prove the Worker it just shipped is the one answering at your
+  // domain. `CF_VERSION_METADATA` is the name the code reads; renaming it binds something nothing
+  // consumes.
+  // Every environment repeats it, and must: an env.<name> stanza does NOT inherit version_metadata
+  // from the top level. Leave it out of a stanza and that environment deploys with no binding at all —
+  // no error, one warning inside a deploy — and `pithy deploy`'s post-deploy version check is left
+  // permanently inconclusive there. `pithy doctor` reports a stanza that does not repeat it.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+
+  // The top level is the dev environment — what `wrangler dev` runs locally.
+  // `pithy add <capability>` appends the bindings a capability needs, per environment.
+  // `ENVIRONMENT` names this environment — the one signal that decides dev vs deployed,
+  // and the value log records carry as their `env` correlation field.
+  // `PROJECT` names the owning project (the root pithy.config.ts `name`). Cloudflare Images and
+  // Stream are account-flat and key an asset by an id they mint, so this var is the only thing
+  // that says which project owns an upload this Worker makes.
+  // `WORKER` names this Worker — its apps/<name> directory. The runtime tells a script nothing
+  // about itself, and two Workers that declare the same binding share one database, so this is
+  // what separates their audit events. Every environment repeats all three:
+  // `env.<name>.vars` REPLACES this block rather than merging it.
+  "vars": {
+    "ENVIRONMENT": "dev",
+    "PROJECT": "stats",
+    "WORKER": "api"
+  },
+  "d1_databases": [],
+  "kv_namespaces": [],
+
+  // Staging serves test users; production serves paid users. Each environment names its Worker
+  // explicitly, in the shape every other Pithy resource takes: <project>-<env>-<worker>. wrangler
+  // would otherwise suffix the top-level name (pithy-app-api-staging), which sorts this Worker away
+  // from the D1, KV, buckets and capability Workers of the environment it belongs to. Grouping by
+  // environment is how an account is read and how blast radius is reasoned about.
+  // Rename one and it deploys as a new script: the old name keeps answering until you delete it.
+  //
+  // Each stanza repeats what it must, and the repetition is the mechanism rather than an oversight.
+  // A minority of wrangler keys are NOT inherited by an environment — `vars`, `version_metadata`, and
+  // every binding block among them. Declared above and left out of a stanza, they are simply absent in
+  // that environment, whatever the top level says. `observability` and `compatibility_date` are not on
+  // that list and are inherited, which is why they are declared once and never repeated.
+  // `pithy doctor` reads the file and reports any stanza that goes without something the top level
+  // declares.
+  "env": {
+    "staging": {
+      "name": "stats-staging-api",
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "PROJECT": "stats",
+        "WORKER": "api"
+      },
+      "version_metadata": { "binding": "CF_VERSION_METADATA" },
+      "d1_databases": [],
+      "kv_namespaces": []
+    },
+    "prod": {
+      "name": "stats-prod-api",
+      "vars": {
+        "ENVIRONMENT": "prod",
+        "PROJECT": "stats",
+        "WORKER": "api"
+      },
+      "version_metadata": { "binding": "CF_VERSION_METADATA" },
+      "d1_databases": [],
+      "kv_namespaces": []
+    }
+  }
+}

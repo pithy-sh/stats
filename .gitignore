@@ -1,0 +1,41 @@
+# deps & build
+node_modules/
+dist/
+
+# cloudflare / wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# pithy local dev state
+.dev-state.json
+# Legacy: the port registry lives at <config>/dev-ports.json now (#435). Kept so a project scaffolded
+# before the move keeps ignoring the file it already has.
+.dev-ports.json
+logs/
+
+# pithy feature worktrees + per-feature state
+.worktrees/
+.dev.config.json
+.pithy-feature.json
+
+# env & secrets
+# No dev secrets line. They live at <config>/<project>/secrets.jsonc, outside every checkout, so there
+# is nothing here to ignore — and `.dev.secrets.example.jsonc` is committed documentation. See #156.
+.env
+.env.*
+!.env.example
+
+# `pithy backup` writes here by default. A backup holds every row, live session tokens and OAuth tokens
+# among them, so it must never be committable.
+backups/
+
+# atomic-write temp siblings (.dev.vars.<rand>.tmp, …). A write interrupted by SIGINT leaves one
+# holding the full plaintext; it must never be committable.
+*.tmp
+
+# editor / os
+.DS_Store
+*.log
+coverage/

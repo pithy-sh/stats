@@ -10,6 +10,7 @@ import {
   writeDailyDownloads,
   writeDependents,
   writeIssues,
+  writeKitCount,
   writePullRequests,
   writeRegistry,
   writeRepo,
@@ -309,5 +310,60 @@ describe("recordCollected", () => {
       { step: "github", collectedAt: Date.parse("2026-11-09T02:01:00Z") },
       { step: "registry", collectedAt: Date.parse("2026-11-09T02:00:30Z") },
     ]);
+  });
+});
+
+describe("writeKitCount", () => {
+  test("keeps one row per capture day, and a re-run of the day replaces it", async () => {
+    const first = "a".repeat(40);
+    const second = "b".repeat(40);
+    await writeKitCount(
+      db(),
+      "pithy-sh/pithy",
+      first,
+      { tests: 10, codeLines: 100 },
+      "2026-11-08",
+      new Date("2026-11-08T02:01:00Z"),
+    );
+    await writeKitCount(
+      db(),
+      "pithy-sh/pithy",
+      first,
+      { tests: 11, codeLines: 110 },
+      "2026-11-09",
+      new Date("2026-11-09T02:01:00Z"),
+    );
+    await writeKitCount(
+      db(),
+      "pithy-sh/pithy",
+      second,
+      { tests: 12, codeLines: 120 },
+      "2026-11-09",
+      new Date("2026-11-09T09:00:00Z"),
+    );
+    expect(await db().selectFrom("kitCounts").selectAll().orderBy("capturedOn").execute()).toEqual([
+      {
+        repo: "pithy-sh/pithy",
+        capturedOn: "2026-11-08",
+        commit: first,
+        tests: 10,
+        codeLines: 100,
+        countedAt: Date.parse("2026-11-08T02:01:00Z"),
+      },
+      {
+        repo: "pithy-sh/pithy",
+        capturedOn: "2026-11-09",
+        commit: second,
+        tests: 12,
+        codeLines: 120,
+        countedAt: Date.parse("2026-11-09T09:00:00Z"),
+      },
+    ]);
+  });
+
+  test("refuses a commit that is not a full SHA", async () => {
+    await expect(
+      writeKitCount(db(), "pithy-sh/pithy", "abc123", { tests: 1, codeLines: 1 }, "2026-11-09", new Date()),
+    ).rejects.toThrow();
   });
 });

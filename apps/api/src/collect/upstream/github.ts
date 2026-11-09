@@ -1,6 +1,6 @@
 import { UpstreamError } from "@pithy-sh/core/src/error/pithyError";
 import { z } from "zod";
-import { type Fetcher, requestJson, requestJsonWithHeaders } from "./http";
+import { type Fetcher, requestJson, requestJsonWithHeaders, requestStream } from "./http";
 
 const GRAPHQL = "https://api.github.com/graphql";
 const PAGE_SIZE = 100;
@@ -366,4 +366,37 @@ export async function fetchCommits(fetcher: Fetcher, token: string, repo: string
     return data.repository.defaultBranchRef?.target.history ?? null;
   });
   return nodes.map((node) => ({ oid: node.oid, committedAt: node.committedDate }));
+}
+
+const BranchRef = z
+  .object({
+    object: z
+      .object({
+        sha: z
+          .string()
+          .regex(/^[0-9a-f]{40}$/)
+          .describe("The full SHA the branch points at."),
+      })
+      .describe("What the ref points at."),
+  })
+  .describe("A branch ref.");
+
+/** The full SHA of the commit at the head of `branch`. */
+export async function fetchBranchHead(fetcher: Fetcher, token: string, repo: string, branch: string): Promise<string> {
+  const ref = await requestJson(fetcher, `https://api.github.com/repos/${repo}/git/ref/heads/${branch}`, BranchRef, {
+    headers: authorization(token),
+  });
+  return ref.object.sha;
+}
+
+/** The gzipped tarball of the repository at `sha`, as a stream: it is never held whole. */
+export async function fetchTarball(
+  fetcher: Fetcher,
+  token: string,
+  repo: string,
+  sha: string,
+): Promise<ReadableStream<Uint8Array>> {
+  return requestStream(fetcher, `https://api.github.com/repos/${repo}/tarball/${sha}`, {
+    headers: { ...authorization(token), accept: "application/vnd.github+json" },
+  });
 }

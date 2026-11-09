@@ -134,6 +134,25 @@ function rows(): PublishRows {
       { step: "registry", collectedAt: at("2026-11-09T02:00:10Z") },
       { step: "github", collectedAt: at("2026-11-08T02:01:00Z") },
       { step: "depsDev", collectedAt: at("2026-11-09T02:02:00Z") },
+      { step: "kit", collectedAt: at("2026-11-09T02:01:30Z") },
+    ],
+    kitCounts: [
+      {
+        repo: REPO,
+        capturedOn: "2026-11-09",
+        commit: "b".repeat(40),
+        tests: 120,
+        codeLines: 9000,
+        countedAt: at("2026-11-09T02:01:29Z"),
+      },
+      {
+        repo: REPO,
+        capturedOn: "2026-11-07",
+        commit: "a".repeat(40),
+        tests: 100,
+        codeLines: 8000,
+        countedAt: at("2026-11-07T02:01:20Z"),
+      },
     ],
   };
 }
@@ -152,6 +171,7 @@ const empty: PublishRows = {
   dependents: [],
   scorecard: null,
   collections: [],
+  kitCounts: [],
 };
 
 describe("SOURCE_STEPS", () => {
@@ -180,7 +200,7 @@ describe("buildLatest", () => {
       jsdelivr: { collectedAt: null },
       depsDev: { collectedAt: "2026-11-09T02:02:00.000Z" },
       scorecard: { collectedAt: "2026-11-09T02:02:00.000Z" },
-      kit: { collectedAt: null },
+      kit: { collectedAt: "2026-11-09T02:01:30.000Z" },
     });
   });
 
@@ -297,8 +317,22 @@ describe("buildLatest", () => {
     expect(latest.scorecard).toEqual({ score: 5.5, checkedAt: "2026-11-02" });
   });
 
+  test("carries the newest count of the kit, the commit it was taken at, and every day counted oldest first", () => {
+    expect(latest.kit).toEqual({
+      commit: "b".repeat(40),
+      countedAt: "2026-11-09T02:01:29.000Z",
+      tests: 120,
+      codeLines: 9000,
+      history: [
+        { date: "2026-11-07", commit: "a".repeat(40), tests: 100, codeLines: 8000 },
+        { date: "2026-11-09", commit: "b".repeat(40), tests: 120, codeLines: 9000 },
+      ],
+    });
+  });
+
   test("leaves the kit's own numbers null until they are counted", () => {
-    expect(latest.kit).toEqual({ commit: null, countedAt: null, tests: null, codeLines: null, history: [] });
+    const bare = buildLatest(empty, { repo: REPO }, NOW);
+    expect(bare.kit).toEqual({ commit: null, countedAt: null, tests: null, codeLines: null, history: [] });
   });
 
   test("leaves every source null, never zero, before anything is collected", () => {
@@ -346,7 +380,7 @@ describe("buildSummary", () => {
       bugs: { total: 2, open: 1, medianMinutesToFix: 60 },
       pullRequests: { merged: 1, medianMinutesToMerge: 30 },
       github: { stars: 50 },
-      kit: { tests: null, codeLines: null, commit: null },
+      kit: { tests: 120, codeLines: 9000, commit: "b".repeat(40) },
     });
   });
 

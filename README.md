@@ -1,12 +1,12 @@
 # Pithy Stats
 
-Downloads, releases, issues and repo numbers for every `@pithy-sh` package, collected once a day and served as JSON. It powers [pithy.sh/stats](https://pithy.sh/stats).
+Downloads, releases, issues and repo numbers for every `@pithy-sh` package, and the tests and code lines in the kit's source, collected once a day and served as JSON. It powers [pithy.sh/stats](https://pithy.sh/stats).
 
 Built with Pithy. Runs on Cloudflare: one Worker, one D1 database, one R2 bucket, and a Workflow a cron starts at 02:00 UTC.
 
 ## How it works
 
-1. **Collect.** The daily Workflow reads npm, the npm registry, GitHub, jsDelivr and deps.dev, each in its own retried step.
+1. **Collect.** The daily Workflow reads npm, the npm registry, GitHub, jsDelivr and deps.dev, each in its own retried step. One more step counts the kit: it resolves the head of `pithy-sh/pithy`'s `main` to a commit, streams that commit's tarball from the GitHub API, and counts the `.ts` and `.tsx` files under `packages/*/src/`. Tests are the `it(` and `test(` calls in test files, each form counting once; code lines are the lines of every other file that are not blank, not only a `//` comment, and not inside a `/* … */` block.
 2. **Keep.** It writes everything to D1, including the per-version counts npm only keeps for seven days.
 3. **Publish.** Once every source step has finished, it builds `summary.json` and `latest.json` from D1 and writes each to R2 with a dated snapshot beside it. A source that failed is published with its last good data and the time it last succeeded.
 4. **Serve.** A request is answered from the edge cache, or from one R2 read, cached until 02:05 UTC, with an ETag.
@@ -36,7 +36,7 @@ bunx wrangler workflows trigger stats-prod-api-collect '{"date":"2026-11-08"}'
 bunx wrangler workflows trigger stats-prod-api-collect '{"backfill":true}'
 ```
 
-The GitHub step reads a fine-grained, read-only token from the Secrets Store. Set it once per environment with `bun run pithy secrets create github-token --env staging` and `--env prod`.
+The GitHub and kit steps read a fine-grained, read-only token from the Secrets Store. Set it once per environment with `bun run pithy secrets create github-token --env staging` and `--env prod`.
 
 ## Develop
 

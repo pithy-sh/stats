@@ -7,6 +7,7 @@ import { z } from "zod";
 import { type StatsDatabase, statsDatabase } from "../data/tables";
 import { GITHUB_TOKEN, statsSecretRegistry } from "../secret/registry";
 import { Day, downloadWindow, utcDay } from "./day";
+import { countTarball } from "./kit/source";
 import { publish } from "./publish/publish";
 import {
   recordCollected,
@@ -16,6 +17,7 @@ import {
   writeDailyDownloads,
   writeDependents,
   writeIssues,
+  writeKitCount,
   writePullRequests,
   writeRegistry,
   writeRepo,
@@ -23,7 +25,14 @@ import {
   writeVersionDownloads,
 } from "./store";
 import { fetchDependents, fetchScorecard } from "./upstream/depsDev";
-import { fetchCommits, fetchIssues, fetchPullRequests, fetchRepoStats } from "./upstream/github";
+import {
+  fetchBranchHead,
+  fetchCommits,
+  fetchIssues,
+  fetchPullRequests,
+  fetchRepoStats,
+  fetchTarball,
+} from "./upstream/github";
 import { type Fetcher, runtimeFetch } from "./upstream/http";
 import { fetchCdnStats } from "./upstream/jsdelivr";
 import { fetchDailyDownloads, fetchOrgPackages, fetchRegistry, fetchVersionDownloads } from "./upstream/npm";
@@ -32,6 +41,8 @@ import { fetchDailyDownloads, fetchOrgPackages, fetchRegistry, fetchVersionDownl
 export const KIT_ORG = "pithy-sh";
 /** The repository whose GitHub numbers are counted. */
 export const KIT_REPO = "pithy-sh/pithy";
+/** The branch whose head the kit's tests and code lines are counted at. */
+export const KIT_BRANCH = "main";
 /** The day the kit was first published: where a backfill of daily downloads starts. */
 export const FIRST_PUBLISH_DAY: Day = "2026-09-05";
 
@@ -100,6 +111,7 @@ export const STEPS = {
   dailyDownloads: "daily downloads",
   versionDownloads: "version downloads",
   github: "github",
+  kit: "kit",
   jsdelivr: "jsdelivr",
   depsDev: "deps.dev",
 } as const;
@@ -147,7 +159,7 @@ async function sum<T>(items: readonly T[], each: (item: T) => Promise<number>): 
 /**
  * Each source as one unit of work: fetch, then write, inside its own step. Each answers the rows it wrote.
  * Only daily downloads read `day`, because only they come from a dated historical API; everything is
- * stamped with `today`, the day it was fetched.
+ * stamped with `today`, the day it was fetched. The kit's count records `now()` as when it was taken.
  */
 function sources(
   db: StatsDatabase,
@@ -157,6 +169,7 @@ function sources(
   today: Day,
   packages: readonly string[],
   job: CollectJob,
+  now: () => Date,
 ): Record<Exclude<keyof typeof STEPS, "packages">, () => Promise<number>> {
   return {
     registry: () =>
@@ -191,6 +204,14 @@ function sources(
       await writePullRequests(db, KIT_REPO, pullRequests, today);
       await writeCommits(db, KIT_REPO, commits);
       return 1 + issues.length + pullRequests.length + commits.length;
+    },
+    kit: async () => {
+      const token = (await secretsStore(env, statsSecretRegistry)).get(GITHUB_TOKEN);
+      // Resolved first, so the row names the exact commit counted even if the branch moves during the download.
+      const commit = await fetchBranchHead(fetcher, token, KIT_REPO, KIT_BRANCH);
+      const counts = await countTarball(await fetchTarball(fetcher, token, KIT_REPO, commit));
+      await writeKitCount(db, KIT_REPO, commit, counts, today, now());
+      return 1;
     },
     jsdelivr: () =>
       sum(packages, async (name) => {
@@ -249,7 +270,7 @@ export async function runCollect(
 
   const rows: Record<string, number> = {};
   const failed: string[] = [];
-  for (const [source, run] of Object.entries(sources(db, env, fetcher, day, today, packages, job))) {
+  for (const [source, run] of Object.entries(sources(db, env, fetcher, day, today, packages, job, now))) {
     const name = STEPS[source as keyof typeof STEPS];
     try {
       rows[name] = await step.do(name, SOURCE_STEP, async () => {

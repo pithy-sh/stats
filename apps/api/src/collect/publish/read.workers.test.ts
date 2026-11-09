@@ -10,6 +10,7 @@ import {
   writeDailyDownloads,
   writeDependents,
   writeIssues,
+  writeKitCount,
   writePullRequests,
   writeRegistry,
   writeRepo,
@@ -87,6 +88,7 @@ describe("readPublishRows", () => {
       dependents: [],
       scorecard: null,
       collections: [],
+      kitCounts: [],
     });
   });
 
@@ -182,5 +184,44 @@ describe("readPublishRows", () => {
       commits: 9,
       contributors: 1,
     });
+  });
+
+  test("reads the kit's counts for the repository, oldest first, with each instant decoded", async () => {
+    await writeKitCount(
+      db(),
+      REPO,
+      "b".repeat(40),
+      { tests: 2, codeLines: 20 },
+      "2026-11-09",
+      new Date("2026-11-09T02:01:00Z"),
+    );
+    await writeKitCount(
+      db(),
+      REPO,
+      "a".repeat(40),
+      { tests: 1, codeLines: 10 },
+      "2026-11-08",
+      new Date("2026-11-08T02:01:00Z"),
+    );
+    await writeKitCount(db(), "someone/else", "c".repeat(40), { tests: 9, codeLines: 90 }, "2026-11-09", new Date());
+    const rows = await readPublishRows(db(), REPO);
+    expect(rows.kitCounts).toEqual([
+      {
+        repo: REPO,
+        capturedOn: "2026-11-08",
+        commit: "a".repeat(40),
+        tests: 1,
+        codeLines: 10,
+        countedAt: new Date("2026-11-08T02:01:00Z"),
+      },
+      {
+        repo: REPO,
+        capturedOn: "2026-11-09",
+        commit: "b".repeat(40),
+        tests: 2,
+        codeLines: 20,
+        countedAt: new Date("2026-11-09T02:01:00Z"),
+      },
+    ]);
   });
 });

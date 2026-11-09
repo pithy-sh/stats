@@ -5,6 +5,7 @@ import {
   Commit,
   DependentSnapshot,
   Issue,
+  KitCount,
   PullRequest,
   RegistrySnapshot,
   RepoSnapshot,
@@ -64,5 +65,9 @@ export async function readPublishRows(db: StatsDatabase, repo: string): Promise<
     scorecard:
       scorecardRow === undefined ? null : ScorecardSnapshot.decode(scorecardRow as z.input<typeof ScorecardSnapshot>),
     collections: decodeAll(Collection, await db.selectFrom("collections").selectAll().execute()),
+    kitCounts: decodeAll(
+      KitCount,
+      await db.selectFrom("kitCounts").selectAll().where("repo", "=", repo).orderBy("capturedOn").execute(),
+    ),
   };
 }

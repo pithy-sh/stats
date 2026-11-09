@@ -28,6 +28,14 @@ async function primaryKey(table: string): Promise<string[]> {
     .map((row) => row.name);
 }
 
+/** Roll back to the schema before 0002: every later migration comes down first. */
+async function rollbackPublish(): Promise<void> {
+  for (;;) {
+    const results = await rollbackMigration(env.DB, statsMigrationProvider());
+    if (results.length === 0 || results.some((result) => result.migrationName.endsWith("0002_publish"))) return;
+  }
+}
+
 beforeEach(async () => {
   await freshDatabase(env.DB);
 });
@@ -45,7 +53,7 @@ describe("0002_publish", () => {
   });
 
   test("down removes what up added and leaves the first schema", async () => {
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackPublish();
     const present = await tables();
     expect(present).not.toContain("commits");
     expect(present).not.toContain("collections");
@@ -56,7 +64,7 @@ describe("0002_publish", () => {
   });
 
   test("up again after down restores it", async () => {
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackPublish();
     await runMigrations(env.DB, statsMigrationProvider());
     expect(await columns("registry_latest")).toContain("description");
     expect(await primaryKey("collections")).toEqual(["step"]);

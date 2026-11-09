@@ -22,9 +22,21 @@ const SOURCES = Object.entries(
 /** The folders allowed to reach the app D1: the collector, the schema and its migrations. */
 const D1_OWNERS = ["./collect/", "./data/", "./migrations/"];
 
+/** The folders a request handler is built from. Nothing in them may reach D1 or an upstream. */
+const REQUEST_PATHS = ["./serve/", "./contract/"];
+
 describe("no request path reads D1", () => {
-  test("the app mounts no routes of its own, so only the built-in health check answers a request", () => {
-    expect(config.app.routes).toBeUndefined();
+  test("the app mounts its routes from serve/", () => {
+    expect(config.app.routes).toBeTypeOf("function");
+    expect(SOURCES.some(([path]) => path === "./serve/routes.ts")).toBe(true);
+  });
+
+  test("no request path reads the collector, calls fetch or names an upstream", () => {
+    const requestSources = SOURCES.filter(([path]) => REQUEST_PATHS.some((folder) => path.startsWith(folder)));
+    expect(requestSources.length).toBeGreaterThan(0);
+    for (const [path, source] of requestSources) {
+      expect(source, path).not.toMatch(/\bfetch\(|\/collect\/|https:\/\/(?!pithy\.sh|staging\.pithy\.sh)/);
+    }
   });
 
   test("only the collector, the schema and its migrations name the app database", () => {

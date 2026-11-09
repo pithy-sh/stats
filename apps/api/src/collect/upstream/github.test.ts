@@ -1,6 +1,14 @@
 import { PithyError } from "@pithy-sh/core/src/error/pithyError";
 import { describe, expect, test } from "vitest";
-import { contributorCount, fetchIssues, fetchPullRequests, fetchRepoStats, lastPage, MAX_PAGES } from "./github";
+import {
+  contributorCount,
+  fetchCommits,
+  fetchIssues,
+  fetchPullRequests,
+  fetchRepoStats,
+  lastPage,
+  MAX_PAGES,
+} from "./github";
 import { type StubCall, stubFetch } from "./testing";
 
 const TOKEN = "test-token";
@@ -49,12 +57,13 @@ describe("contributorCount", () => {
 });
 
 describe("fetchRepoStats", () => {
-  test("reads stars, forks and commits over GraphQL, and contributors over REST", async () => {
+  test("reads stars, forks, commits and the creation time over GraphQL, and contributors over REST", async () => {
     const stub = stubFetch({
       [GRAPHQL]: {
         json: {
           data: {
             repository: {
+              createdAt: "2026-08-20T12:00:00Z",
               stargazerCount: 120,
               forkCount: 8,
               defaultBranchRef: { target: { history: { totalCount: 2400 } } },
@@ -65,6 +74,7 @@ describe("fetchRepoStats", () => {
       "https://api.github.com/repos/pithy-sh/pithy/contributors*": { json: [{}, {}, {}] },
     });
     expect(await fetchRepoStats(stub.fetch, TOKEN, "pithy-sh/pithy")).toEqual({
+      createdAt: new Date("2026-08-20T12:00:00Z"),
       stars: 120,
       forks: 8,
       commits: 2400,
@@ -190,6 +200,44 @@ describe("fetchPullRequests", () => {
         deletions: 2,
       },
     ]);
+  });
+});
+
+describe("fetchCommits", () => {
+  test("pages through every commit on the default branch", async () => {
+    const stub = stubFetch({
+      [GRAPHQL]: (call) => {
+        const first = variables(call).after === null;
+        return {
+          json: {
+            data: {
+              repository: {
+                defaultBranchRef: {
+                  target: {
+                    history: {
+                      pageInfo: { hasNextPage: first, endCursor: first ? "c1" : "c2" },
+                      nodes: first
+                        ? [{ oid: "b".repeat(40), committedDate: "2026-09-07T00:00:00Z" }]
+                        : [{ oid: "a".repeat(40), committedDate: "2026-09-05T00:00:00Z" }],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    expect(await fetchCommits(stub.fetch, TOKEN, "pithy-sh/pithy")).toEqual([
+      { oid: "b".repeat(40), committedAt: new Date("2026-09-07T00:00:00Z") },
+      { oid: "a".repeat(40), committedAt: new Date("2026-09-05T00:00:00Z") },
+    ]);
+    expect(stub.calls.map((call) => variables(call).after)).toEqual([null, "c1"]);
+  });
+
+  test("is empty for a repository with no default branch", async () => {
+    const stub = stubFetch({ [GRAPHQL]: { json: { data: { repository: { defaultBranchRef: null } } } } });
+    expect(await fetchCommits(stub.fetch, TOKEN, "pithy-sh/pithy")).toEqual([]);
   });
 });
 

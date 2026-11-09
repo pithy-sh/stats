@@ -94,6 +94,7 @@ describe("fetchVersionDownloads", () => {
 describe("fetchRegistry", () => {
   const packument = {
     name: "@pithy-sh/core",
+    description: "The Pithy kit's core.",
     "dist-tags": { latest: "0.20.0", next: "0.21.0-rc.1" },
     time: {
       created: "2026-09-05T10:00:00.000Z",
@@ -116,6 +117,7 @@ describe("fetchRegistry", () => {
     const stub = stubFetch({ "https://registry.npmjs.org/@pithy-sh%2Fcore": { json: packument } });
     expect(await fetchRegistry(stub.fetch, "@pithy-sh/core")).toEqual({
       latestVersion: "0.20.0",
+      description: "The Pithy kit's core.",
       createdAt: new Date("2026-09-05T10:00:00.000Z"),
       versions: [
         { version: "0.1.0", publishedAt: new Date("2026-09-05T10:00:00.000Z") },
@@ -131,11 +133,17 @@ describe("fetchRegistry", () => {
   test("answers empty dependencies and null sizes where the manifest leaves them out", async () => {
     const stub = stubFetch({
       "https://registry.npmjs.org/@pithy-sh%2Fcore": {
-        json: { ...packument, "dist-tags": { latest: "0.1.0" }, versions: { "0.1.0": { dist: {} } } },
+        json: {
+          ...packument,
+          description: undefined,
+          "dist-tags": { latest: "0.1.0" },
+          versions: { "0.1.0": { dist: {} } },
+        },
       },
     });
     expect(await fetchRegistry(stub.fetch, "@pithy-sh/core")).toMatchObject({
       latestVersion: "0.1.0",
+      description: null,
       unpackedSize: null,
       fileCount: null,
       dependencies: {},

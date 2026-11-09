@@ -66,6 +66,7 @@ export const RegistrySnapshot = z
     packageName: PackageName,
     capturedOn: CapturedOn,
     latestVersion: z.string().min(1).describe("`dist-tags.latest` on the capture day."),
+    description: z.string().nullable().describe("npm's description of the package, or null when it has none."),
     createdAt: SQLiteDate.nullable().describe("When the package was first published, or null when unknown."),
     versionCount: Count.describe("Versions in the registry on the capture day."),
     unpackedSize: Count.nullable().describe("The latest version's unpacked size in bytes, or null."),
@@ -80,6 +81,9 @@ export const RepoSnapshot = z
   .object({
     repo: Repo,
     capturedOn: CapturedOn,
+    createdAt: SQLiteDate.nullable().describe(
+      "When the repository was created, or null on a row captured before it was read.",
+    ),
     stars: Count.describe("Stargazers."),
     forks: Count.describe("Forks."),
     commits: Count.describe("Commits on the default branch."),
@@ -119,6 +123,23 @@ export const PullRequest = z
     "One pull request as captured on one day, in `pull_request_snapshots`, and as of the newest capture, in `pull_requests`.",
   );
 export type PullRequest = z.output<typeof PullRequest>;
+
+export const Commit = z
+  .object({
+    repo: Repo,
+    oid: z.string().min(1).describe("The commit's full SHA."),
+    committedAt: SQLiteDate.describe("When it was committed."),
+  })
+  .describe("One commit reachable from the repository's default branch, in `commits`.");
+export type Commit = z.output<typeof Commit>;
+
+export const Collection = z
+  .object({
+    step: z.string().min(1).describe("The collector step, by its key in `STEPS`."),
+    collectedAt: SQLiteDate.describe("When the step last finished without error."),
+  })
+  .describe("When one collector step last succeeded, in `collections`. A failed step leaves its row as it was.");
+export type Collection = z.output<typeof Collection>;
 
 export const CdnSnapshot = z
   .object({
@@ -173,6 +194,8 @@ export const statsTables = {
   issueSnapshots: Issue,
   pullRequests: PullRequest,
   pullRequestSnapshots: PullRequest,
+  commits: Commit,
+  collections: Collection,
   cdnSnapshots: CdnSnapshot,
   cdnLatest: CdnSnapshot,
   dependentSnapshots: DependentSnapshot,

@@ -7,9 +7,12 @@ import { z } from "zod";
 import { type StatsDatabase, statsDatabase } from "../data/tables";
 import { GITHUB_TOKEN, statsSecretRegistry } from "../secret/registry";
 import { Day, downloadWindow, utcDay } from "./day";
+import { publish } from "./publish/publish";
 import {
+  recordCollected,
   recordPackages,
   writeCdn,
+  writeCommits,
   writeDailyDownloads,
   writeDependents,
   writeIssues,
@@ -20,7 +23,7 @@ import {
   writeVersionDownloads,
 } from "./store";
 import { fetchDependents, fetchScorecard } from "./upstream/depsDev";
-import { fetchIssues, fetchPullRequests, fetchRepoStats } from "./upstream/github";
+import { fetchCommits, fetchIssues, fetchPullRequests, fetchRepoStats } from "./upstream/github";
 import { type Fetcher, runtimeFetch } from "./upstream/http";
 import { fetchCdnStats } from "./upstream/jsdelivr";
 import { fetchDailyDownloads, fetchOrgPackages, fetchRegistry, fetchVersionDownloads } from "./upstream/npm";
@@ -56,9 +59,13 @@ export const collectWorkflows: WorkflowSpecMap = {
   collect: { binding: COLLECT_BINDING, params: CollectJob, schedule: COLLECT_CRON, className: "CollectWorkflow" },
 };
 
-/** What the collector needs off the Worker env: the app D1, and the secrets the GitHub token is read from. */
+/**
+ * What the collector needs off the Worker env: the app D1, the secrets the GitHub token is read from, and the R2
+ * bucket the publish step writes to.
+ */
 export interface CollectEnv extends SecretsStoreEnv {
   DB: D1Database;
+  PUBLISHED: R2Bucket;
 }
 
 /** The one step method the collector uses. */
@@ -76,6 +83,15 @@ export const SOURCE_STEP = {
   retries: { limit: 5, delay: "1 minute", backoff: "exponential" },
   timeout: "10 minutes",
 } as const satisfies WorkflowStepConfig;
+
+/** The publish step: a retry rebuilds both files from D1 and rewrites them, so it can safely run again. */
+export const PUBLISH_STEP = {
+  retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
+  timeout: "5 minutes",
+} as const satisfies WorkflowStepConfig;
+
+/** The publish step's name. It runs once every source step has finished, whether or not each succeeded. */
+export const PUBLISH = "publish";
 
 /** The step names, which are also how a run's sources are named in its report and its failure. */
 export const STEPS = {
@@ -96,6 +112,9 @@ export const CollectReport = z
     rows: z
       .record(z.string().describe("A step name."), z.number().int().nonnegative().describe("Rows it wrote."))
       .describe("Rows each source step wrote."),
+    published: z
+      .record(z.string().describe("An R2 key."), z.number().int().nonnegative().describe("Bytes written."))
+      .describe("What the publish step wrote to R2."),
   })
   .describe("What one collector run did. Counts only: no upstream data and no credential.");
 export type CollectReport = z.output<typeof CollectReport>;
@@ -166,10 +185,12 @@ function sources(
       const stats = await fetchRepoStats(fetcher, token, KIT_REPO);
       const issues = await fetchIssues(fetcher, token, KIT_REPO);
       const pullRequests = await fetchPullRequests(fetcher, token, KIT_REPO);
+      const commits = await fetchCommits(fetcher, token, KIT_REPO);
       await writeRepo(db, KIT_REPO, stats, today);
       await writeIssues(db, KIT_REPO, issues, today);
       await writePullRequests(db, KIT_REPO, pullRequests, today);
-      return 1 + issues.length + pullRequests.length;
+      await writeCommits(db, KIT_REPO, commits);
+      return 1 + issues.length + pullRequests.length + commits.length;
     },
     jsdelivr: () =>
       sum(packages, async (name) => {
@@ -202,12 +223,17 @@ function sources(
  *
  * Every write is an upsert keyed by the day it was captured, so two runs on one day leave one set of rows,
  * and a run for an earlier date refills that date's daily downloads without rewriting any earlier snapshot.
+ *
+ * Each step that succeeds records when it finished, inside the step, so a failed one keeps its last good time.
+ * Once every source step has finished, the publish step builds the JSON from D1 and writes it to R2, so a source
+ * that failed is published with its last good data and its old time.
  */
 export async function runCollect(
   env: CollectEnv,
   event: CollectEvent,
   step: CollectStep,
   fetcher: Fetcher = runtimeFetch,
+  now: () => Date = () => new Date(),
 ): Promise<CollectReport> {
   const job = CollectJob.parse(event.payload ?? {});
   const day = runDay(event, job);
@@ -217,6 +243,7 @@ export async function runCollect(
   const packages = await step.do(STEPS.packages, SOURCE_STEP, async () => {
     const names = await fetchOrgPackages(fetcher, KIT_ORG);
     await recordPackages(db, names, today);
+    await recordCollected(db, "packages", now());
     return names;
   });
 
@@ -225,12 +252,18 @@ export async function runCollect(
   for (const [source, run] of Object.entries(sources(db, env, fetcher, day, today, packages, job))) {
     const name = STEPS[source as keyof typeof STEPS];
     try {
-      rows[name] = await step.do(name, SOURCE_STEP, run);
+      rows[name] = await step.do(name, SOURCE_STEP, async () => {
+        const written = await run();
+        await recordCollected(db, source, now());
+        return written;
+      });
     } catch {
       // The step's own error is recorded on the instance by the runtime; the run carries on to the next source.
       failed.push(name);
     }
   }
+
+  const published = await step.do(PUBLISH, PUBLISH_STEP, () => publish(db, env.PUBLISHED, KIT_REPO, today, now()));
 
   if (failed.length > 0) {
     throw new UpstreamError({
@@ -239,5 +272,5 @@ export async function runCollect(
       detail: `Sources that wrote: ${Object.keys(rows).join(", ") || "none"}.`,
     });
   }
-  return { day, capturedOn: today, packages: packages.length, rows };
+  return { day, capturedOn: today, packages: packages.length, rows, published };
 }

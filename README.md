@@ -8,8 +8,21 @@ Built with Pithy. Runs on Cloudflare: one Worker, one D1 database, one R2 bucket
 
 1. **Collect.** The daily Workflow reads npm, the npm registry, GitHub, jsDelivr and deps.dev, each in its own retried step.
 2. **Keep.** It writes everything to D1, including the per-version counts npm only keeps for seven days.
-3. **Publish.** It builds the JSON and writes `latest.json` and a dated snapshot to R2.
-4. **Serve.** A request reads one R2 object, cached until 02:05 UTC, with an ETag.
+3. **Publish.** Once every source step has finished, it builds `summary.json` and `latest.json` from D1 and writes each to R2 with a dated snapshot beside it. A source that failed is published with its last good data and the time it last succeeded.
+4. **Serve.** A request is answered from the edge cache, or from one R2 read, cached until 02:05 UTC, with an ETag.
+
+## The API
+
+`https://stats.pithy.sh` in production, `https://stats-staging.pithy.sh` in staging. Every route is a public `GET`, readable from `https://pithy.sh` and `https://staging.pithy.sh` in a browser.
+
+| Route | Returns | Cached |
+|---|---|---|
+| `/v1/summary` | The home page strip's headline numbers. | Until the next 02:05 UTC (five minutes while that file is late), then revalidated for an hour. |
+| `/v1/latest` | Everything the `/stats/` page draws. | Until the next 02:05 UTC (five minutes while that file is late), then revalidated for an hour. |
+| `/v1/snapshots/<YYYY-MM-DD>/summary` | That day's summary. | Until the next 02:05 UTC or midnight UTC, whichever is sooner, while the day lasts; then a year, immutable. |
+| `/v1/snapshots/<YYYY-MM-DD>/latest` | That day's full file. | Until the next 02:05 UTC or midnight UTC, whichever is sooner, while the day lasts; then a year, immutable. |
+
+Every file is served with its R2 object's ETag and `Last-Modified`, and a matching `If-None-Match` answers 304. A path with nothing published answers 404, cached for five minutes. Query strings are ignored, by the response and by the edge cache's key. The shape of each file is in `apps/api/src/contract/stats.ts` and `apps/api/openapi.json`; a source never collected is `null`, never `0`.
 
 ## Collect by hand
 

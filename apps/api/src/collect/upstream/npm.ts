@@ -83,6 +83,7 @@ const Manifest = z
 
 const Packument = z
   .object({
+    description: z.string().optional().describe("The package's description."),
     "dist-tags": z.object({ latest: z.string().describe("The latest version.") }).describe("The dist tags."),
     time: z
       .record(z.string().describe("A version, or `created` / `modified`."), z.iso.datetime().describe("When."))
@@ -94,6 +95,7 @@ const Packument = z
 export const RegistryFacts = z
   .object({
     latestVersion: z.string().describe("`dist-tags.latest`."),
+    description: z.string().nullable().describe("The package's description, or null when it has none."),
     createdAt: z
       .date()
       .nullable()
@@ -130,6 +132,7 @@ export async function fetchRegistry(fetcher: Fetcher, name: string): Promise<Reg
     .sort((a, b) => a.publishedAt.getTime() - b.publishedAt.getTime());
   return {
     latestVersion,
+    description: doc.description ?? null,
     createdAt: created === undefined ? null : new Date(created),
     versions,
     unpackedSize: latest?.dist.unpackedSize ?? null,

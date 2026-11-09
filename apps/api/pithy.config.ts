@@ -15,17 +15,20 @@ import { compositionEnvironment } from "@pithy-sh/core/src/env/ambient";
 import { originFor } from "@pithy-sh/core/src/naming/domains";
 import { secrets } from "@pithy-sh/secrets/src/index";
 import { COLLECT_BINDING, collectWorkflows } from "./src/collect/workflow";
+import { PUBLISHED_BINDING } from "./src/contract/objects";
 import { APP_MIGRATION_ORDER, RETAINED_TABLES, statsTables } from "./src/data/tables";
 import { STATS_MIGRATIONS } from "./src/migrations/index";
 import { statsSecretRegistry } from "./src/secret/registry";
+import { statsRoutes } from "./src/serve/routes";
 
 // Where this Worker answers, per environment. Declare it once here and the
 // `routes` entry and `vars.BASE_URL` in wrangler.jsonc are generated from it —
 // `pithy init` and `pithy worker add` fill this in when you name a domain.
 // `dev` is absent on purpose: local runs on the port your feature pinned.
+// Both sit one level under pithy.sh, so the zone's Universal SSL certificate covers them.
 const DOMAINS = {
-  // staging: { pattern: "staging.api.example.com", zone: "example.com" },
-  // prod: { pattern: "api.example.com", zone: "example.com" },
+  staging: { pattern: "stats-staging.pithy.sh", zone: "pithy.sh" },
+  prod: { pattern: "stats.pithy.sh", zone: "pithy.sh" },
 };
 
 // This Worker's public origin, for the environment it is composing in. Hand it
@@ -53,6 +56,8 @@ const app = defineCapability({
     { type: "d1", name: "DB" },
     // Declared so a Worker deployed without the binding fails naming it, not on the next 02:00.
     { type: "workflow", name: COLLECT_BINDING },
+    // What is served: the publish step writes the JSON here and every `/v1` route reads one object from it.
+    { type: "r2", name: PUBLISHED_BINDING },
   ],
   // The daily collector. Its spec's cron is what `pithy worker sync` writes into `triggers.crons`, and what
   // `createEntrypoint`'s `scheduled` handler starts it on.
@@ -67,23 +72,10 @@ const app = defineCapability({
       retained: RETAINED_TABLES,
     },
   },
-  // Mount your routes here. Every route declares how callers are verified —
-  // bearer, session, signed-webhook, or public — and what it returns, with
-  // `describeRoute` from @pithy-sh/core/src/http/routeSpec. `pithy contract`
-  // writes that into apps/api/openapi.json for every client to build against.
-  // Read a request through `validate(target, Schema)` from
-  // @pithy-sh/core/src/http/validation. `GET /health` is built in.
-  // routes: (a) => {
-  //   a.get(
-  //     "/hello",
-  //     describeRoute({
-  //       summary: "Say hi.",
-  //       verification: "public",
-  //       responses: { 200: { description: "A greeting.", contentType: "text/plain" } },
-  //     }),
-  //     (c) => c.text("Hi."),
-  //   );
-  // },
+  // The public JSON API under `/v1`: each route reads one R2 object, never D1 or an upstream. Every route
+  // declares how callers are verified and what it returns with `describeRoute`, and reads its request through
+  // `validate`, so `pithy contract` writes it into apps/api/openapi.json. `GET /health` is built in.
+  routes: (a) => statsRoutes(a),
 });
 
 const config = {

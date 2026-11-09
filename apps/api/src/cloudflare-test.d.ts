@@ -6,7 +6,10 @@
 declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
+    PUBLISHED: R2Bucket;
     COLLECT: Workflow;
     GITHUB_TOKEN: string;
+    SECRETS: D1Database;
+    SECRETS_ENCRYPTION_KEYS: string;
   }
 }

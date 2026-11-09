@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { statsDatabase } from "../data/tables";
 import { freshDatabase } from "../data/testing";
 import {
+  recordCollected,
   recordPackages,
   writeCdn,
+  writeCommits,
   writeDailyDownloads,
   writeDependents,
   writeIssues,
@@ -96,6 +98,7 @@ describe("writeVersionDownloads", () => {
 
 const facts = (latestVersion: string): RegistryFacts => ({
   latestVersion,
+  description: "The Pithy kit's core.",
   createdAt: new Date("2026-09-05T10:00:00Z"),
   versions: [{ version: "0.1.0", publishedAt: new Date("2026-09-05T10:00:00Z") }],
   unpackedSize: 100,
@@ -113,6 +116,7 @@ describe("writeRegistry", () => {
     const latest = await db().selectFrom("registryLatest").selectAll().executeTakeFirstOrThrow();
     expect(latest).toMatchObject({
       latestVersion: "0.1.0",
+      description: "The Pithy kit's core.",
       capturedOn: "2026-11-09",
       dependencies: '{"zod":"^4.0.0"}',
     });
@@ -142,11 +146,30 @@ describe("writeRegistry", () => {
 
 describe("GitHub writes", () => {
   test("writeRepo keeps a dated row and the latest", async () => {
-    await writeRepo(db(), "pithy-sh/pithy", { stars: 1, forks: 0, commits: 10, contributors: 1 }, "2026-11-08");
-    await writeRepo(db(), "pithy-sh/pithy", { stars: 2, forks: 1, commits: 12, contributors: 2 }, "2026-11-09");
+    const createdAt = new Date("2026-08-20T12:00:00Z");
+    await writeRepo(
+      db(),
+      "pithy-sh/pithy",
+      { createdAt, stars: 1, forks: 0, commits: 10, contributors: 1 },
+      "2026-11-08",
+    );
+    await writeRepo(
+      db(),
+      "pithy-sh/pithy",
+      { createdAt, stars: 2, forks: 1, commits: 12, contributors: 2 },
+      "2026-11-09",
+    );
     expect(await db().selectFrom("repoSnapshots").selectAll().execute()).toHaveLength(2);
     expect(await db().selectFrom("repoLatest").selectAll().execute()).toEqual([
-      { repo: "pithy-sh/pithy", capturedOn: "2026-11-09", stars: 2, forks: 1, commits: 12, contributors: 2 },
+      {
+        repo: "pithy-sh/pithy",
+        capturedOn: "2026-11-09",
+        createdAt: createdAt.getTime(),
+        stars: 2,
+        forks: 1,
+        commits: 12,
+        contributors: 2,
+      },
     ]);
   });
 
@@ -259,5 +282,32 @@ describe("jsDelivr and deps.dev writes", () => {
       { score: 6.4, scoredAt: Date.parse("2026-11-02T00:00:00Z") },
     ]);
     expect(await db().selectFrom("scorecardSnapshots").selectAll().execute()).toHaveLength(1);
+  });
+});
+
+describe("writeCommits", () => {
+  test("keeps one row per commit, however often it is written", async () => {
+    const commits = [
+      { oid: "a".repeat(40), committedAt: new Date("2026-09-05T00:00:00Z") },
+      { oid: "b".repeat(40), committedAt: new Date("2026-09-07T00:00:00Z") },
+    ];
+    await writeCommits(db(), "pithy-sh/pithy", commits);
+    await writeCommits(db(), "pithy-sh/pithy", commits);
+    expect(await db().selectFrom("commits").selectAll().orderBy("oid").execute()).toEqual([
+      { repo: "pithy-sh/pithy", oid: "a".repeat(40), committedAt: Date.parse("2026-09-05T00:00:00Z") },
+      { repo: "pithy-sh/pithy", oid: "b".repeat(40), committedAt: Date.parse("2026-09-07T00:00:00Z") },
+    ]);
+  });
+});
+
+describe("recordCollected", () => {
+  test("keeps the newest time each step finished", async () => {
+    await recordCollected(db(), "github", new Date("2026-11-08T02:01:00Z"));
+    await recordCollected(db(), "github", new Date("2026-11-09T02:01:00Z"));
+    await recordCollected(db(), "registry", new Date("2026-11-09T02:00:30Z"));
+    expect(await db().selectFrom("collections").selectAll().orderBy("step").execute()).toEqual([
+      { step: "github", collectedAt: Date.parse("2026-11-09T02:01:00Z") },
+      { step: "registry", collectedAt: Date.parse("2026-11-09T02:00:30Z") },
+    ]);
   });
 });

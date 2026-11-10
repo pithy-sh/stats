@@ -1,9 +1,11 @@
 import { InternalError } from "@pithy-sh/core/src/error/pithyError";
 import type { Logger } from "@pithy-sh/core/src/logger/logger";
+import { parseVar } from "@pithy-sh/core/src/worker/vars";
+import { DEFAULT_READY_AFTER_MINUTES, VARS } from "./vars";
 
 /**
  * The one clock the app keeps: the collector's cron. The time a run starts is read off it, and the time its files
- * are taken to be ready is that start plus `READY_AFTER_MINUTES`, a Worker var. The cache's expiry and the JSON's
+ * are taken to be ready is that start plus `READY_AFTER_MINUTES`, a Worker var declared in `vars.ts`. The cache's expiry and the JSON's
  * `nextUpdate` are both derived from these two, so moving the cron moves everything with it. This module imports
  * nothing from the collector, so the serve path can read it without loading collector code.
  */
@@ -15,11 +17,7 @@ import type { Logger } from "@pithy-sh/core/src/logger/logger";
  */
 export const COLLECT_CRON = "0 2 * * *";
 
-/** Minutes after a run starts that its files are taken to be ready, when `READY_AFTER_MINUTES` is unset or invalid. */
-export const DEFAULT_READY_AFTER_MINUTES = 15;
-
 const MS_PER_MINUTE = 60_000;
-const MINUTES_PER_DAY = 1440;
 export const MS_PER_DAY = 86_400_000;
 
 /** When the collector runs and when its files are ready, each in milliseconds. */
@@ -32,7 +30,10 @@ export interface Schedule {
 
 /** What the schedule reads off the Worker env. */
 export interface ScheduleEnv {
-  /** Whole minutes from a run's start to the time its files are taken to be ready; a string, as wrangler vars are. */
+  /**
+   * Whole minutes from a run's start to the time its files are taken to be ready, as a number or as text. Text is read
+   * as JSON, so `" 15"`, `"15.0"` and `"1e1"` are taken as well as `"15"`.
+   */
   READY_AFTER_MINUTES?: unknown;
 }
 
@@ -64,18 +65,6 @@ export function dailyRunStart(cron: string): number {
   return (Number(hour) * 60 + Number(minute)) * MS_PER_MINUTE;
 }
 
-/**
- * `raw` as a whole number of minutes from 0 to under a day, or null when it is anything else: absent, not an
- * integer, negative, or 24 hours or more. A string must be digits only, as a wrangler var holds it.
- */
-export function parseReadyAfterMinutes(raw: unknown): number | null {
-  let minutes: number;
-  if (typeof raw === "number") minutes = raw;
-  else if (typeof raw === "string" && /^\d+$/.test(raw)) minutes = Number(raw);
-  else return null;
-  return Number.isInteger(minutes) && minutes >= 0 && minutes < MINUTES_PER_DAY ? minutes : null;
-}
-
 /** `ms` after midnight as a UTC clock time, `HH:MM`. */
 function clockTime(ms: number): string {
   const minutes = Math.floor(ms / MS_PER_MINUTE);
@@ -93,17 +82,17 @@ function describeRaw(raw: unknown): string {
 }
 
 /**
- * A reader of the {@link Schedule} off the Worker env. A `READY_AFTER_MINUTES` that does not parse falls back to
- * {@link DEFAULT_READY_AFTER_MINUTES} and is logged as a warning the first time this reader sees that value, never
- * again, so a request never fails on it and a busy Worker does not log it on every request.
+ * A reader of the {@link Schedule} off the Worker env, through {@link VARS}. `READY_AFTER_MINUTES` parses as a number,
+ * or as text whose JSON is one, so surrounding whitespace, `15.0` and `1e1` are taken. A value that does not parse
+ * falls back to {@link DEFAULT_READY_AFTER_MINUTES} and is logged as a warning the first time this reader sees that
+ * value, never again, so a request never fails on it and a busy Worker does not log it on every request.
  */
 export function scheduleReader(cron: string = COLLECT_CRON): (env: ScheduleEnv, log: Logger) => Schedule {
   const runStartMs = dailyRunStart(cron);
   const warned = new Set<string>();
   return (env, log) => {
     const raw = env.READY_AFTER_MINUTES;
-    const parsed = parseReadyAfterMinutes(raw);
-    if (parsed === null) {
+    if (!parseVar(VARS.vars.READY_AFTER_MINUTES, raw).ok) {
       const value = describeRaw(raw);
       if (!warned.has(value)) {
         warned.add(value);
@@ -113,7 +102,7 @@ export function scheduleReader(cron: string = COLLECT_CRON): (env: ScheduleEnv, 
         });
       }
     }
-    return { runStartMs, readyAfterMs: (parsed ?? DEFAULT_READY_AFTER_MINUTES) * MS_PER_MINUTE };
+    return { runStartMs, readyAfterMs: VARS.read(env).READY_AFTER_MINUTES * MS_PER_MINUTE };
   };
 }
 

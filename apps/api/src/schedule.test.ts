@@ -2,16 +2,15 @@ import type { Logger } from "@pithy-sh/core/src/logger/logger";
 import { describe, expect, test, vi } from "vitest";
 import {
   COLLECT_CRON,
-  DEFAULT_READY_AFTER_MINUTES,
   dailyRunStart,
   lastRunStart,
   nextReadyTime,
   nextUpdateAfter,
-  parseReadyAfterMinutes,
   READY_RULE,
   type Schedule,
   scheduleReader,
 } from "./schedule";
+import { DEFAULT_READY_AFTER_MINUTES } from "./vars";
 
 const at = (iso: string) => new Date(iso);
 const MINUTE = 60_000;
@@ -77,38 +76,6 @@ describe("dailyRunStart", () => {
   }
 });
 
-describe("parseReadyAfterMinutes", () => {
-  test("reads a whole number of minutes under a day, as a string or a number", () => {
-    expect(parseReadyAfterMinutes("15")).toBe(15);
-    expect(parseReadyAfterMinutes("0")).toBe(0);
-    expect(parseReadyAfterMinutes("1439")).toBe(1439);
-    expect(parseReadyAfterMinutes(30)).toBe(30);
-  });
-
-  for (const raw of [
-    undefined,
-    null,
-    "",
-    " ",
-    "abc",
-    "1.5",
-    "15m",
-    " 15",
-    "-5",
-    "1440",
-    "99999",
-    1.5,
-    -1,
-    1440,
-    NaN,
-    {},
-  ]) {
-    test(`refuses ${typeof raw === "string" ? JSON.stringify(raw) : String(raw)}`, () => {
-      expect(parseReadyAfterMinutes(raw)).toBeNull();
-    });
-  }
-});
-
 describe("scheduleReader", () => {
   test("defaults to 15 minutes after the cron's run start, logging that the var is unset", () => {
     const { log, warnings } = recordingLogger();
@@ -117,16 +84,30 @@ describe("scheduleReader", () => {
     expect(warnings).toHaveLength(1);
   });
 
-  test("takes READY_AFTER_MINUTES from the env when it is valid, without logging", () => {
+  test("takes READY_AFTER_MINUTES from the env when it is valid, as text or as wrangler.jsonc holds it, without logging", () => {
     const { log, warnings } = recordingLogger();
     expect(scheduleReader()({ READY_AFTER_MINUTES: "30" }, log)).toEqual({
       runStartMs: 2 * 60 * MINUTE,
       readyAfterMs: 30 * MINUTE,
     });
+    expect(scheduleReader()({ READY_AFTER_MINUTES: 45 }, log)).toEqual({
+      runStartMs: 2 * 60 * MINUTE,
+      readyAfterMs: 45 * MINUTE,
+    });
     expect(warnings).toHaveLength(0);
   });
 
-  for (const raw of ["abc", "1.5", "-5", "1440"]) {
+  test("takes any JSON spelling of a valid number, surrounding whitespace included, without logging", () => {
+    const { log, warnings } = recordingLogger();
+    const read = scheduleReader();
+    expect(read({ READY_AFTER_MINUTES: " 15" }, log).readyAfterMs).toBe(15 * MINUTE);
+    expect(read({ READY_AFTER_MINUTES: "15 " }, log).readyAfterMs).toBe(15 * MINUTE);
+    expect(read({ READY_AFTER_MINUTES: "1e1" }, log).readyAfterMs).toBe(10 * MINUTE);
+    expect(read({ READY_AFTER_MINUTES: "15.0" }, log).readyAfterMs).toBe(15 * MINUTE);
+    expect(warnings).toHaveLength(0);
+  });
+
+  for (const raw of ["abc", "1.5", "15m", "-5", "1440", "1e4"]) {
     test(`falls back to the default for ${JSON.stringify(raw)}, naming the value it ignored`, () => {
       const { log, warnings } = recordingLogger();
       expect(scheduleReader()({ READY_AFTER_MINUTES: raw }, log)).toEqual(DEFAULT);

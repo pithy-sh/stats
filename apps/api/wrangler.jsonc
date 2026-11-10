@@ -38,14 +38,11 @@
   // about itself, and two Workers that declare the same binding share one database, so this is
   // what separates their audit events. Every environment repeats all three:
   // `env.<name>.vars` REPLACES this block rather than merging it.
-  // `READY_AFTER_MINUTES` is how long after the collector's cron starts a run its files are taken to be ready:
-  // the cache expires current copies then, and the JSON's `nextUpdate` names it. Whole minutes under a day; a
-  // missing or invalid value falls back to 15 and is logged. Every environment repeats it too.
   "vars": {
     "ENVIRONMENT": "dev",
     "PROJECT": "stats",
     "WORKER": "api",
-    "READY_AFTER_MINUTES": "15"
+    "READY_AFTER_MINUTES": 15
   },
   "d1_databases": [
     { "binding": "SECRETS", "database_name": "stats-dev-secrets" },
@@ -75,8 +72,8 @@
         "ENVIRONMENT": "staging",
         "PROJECT": "stats",
         "WORKER": "api",
-        "READY_AFTER_MINUTES": "15",
-        "BASE_URL": "https://stats-staging.pithy.sh"
+        "BASE_URL": "https://stats-staging.pithy.sh",
+        "READY_AFTER_MINUTES": 15
       },
       "version_metadata": { "binding": "CF_VERSION_METADATA" },
       "d1_databases": [
@@ -112,8 +109,8 @@
         "ENVIRONMENT": "prod",
         "PROJECT": "stats",
         "WORKER": "api",
-        "READY_AFTER_MINUTES": "15",
-        "BASE_URL": "https://stats.pithy.sh"
+        "BASE_URL": "https://stats.pithy.sh",
+        "READY_AFTER_MINUTES": 15
       },
       "version_metadata": { "binding": "CF_VERSION_METADATA" },
       "d1_databases": [

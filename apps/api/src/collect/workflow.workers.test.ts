@@ -7,6 +7,7 @@ import {
   waitOnExecutionContext,
 } from "cloudflare:test";
 import { PithyError } from "@pithy-sh/core/src/error/pithyError";
+import { createGate } from "@pithy-sh/core/testing";
 import { sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { currentKey, snapshotKey } from "../contract/objects";
@@ -1326,23 +1327,6 @@ describe("npm's last complete day", { timeout: 30_000 }, () => {
   });
 });
 
-/**
- * A flag one side sets and the other waits on. The wait polls on its own timer rather than awaiting a promise the other
- * side settles: a Workflow step and the test run in separate request contexts, and the runtime takes a step waiting on
- * the test's promise for a hung request.
- */
-function gate(): { open: () => void; opened: () => Promise<void> } {
-  let open = false;
-  return {
-    open: () => {
-      open = true;
-    },
-    opened: async () => {
-      while (!open) await new Promise((resolve) => setTimeout(resolve, 5));
-    },
-  };
-}
-
 // Two instances run side by side, each held at one request until the test lets it through.
 describe("two runs on one day at once", { timeout: 30_000 }, () => {
   const VERSIONS = "https://api.npmjs.org/versions/";
@@ -1358,10 +1342,10 @@ describe("two runs on one day at once", { timeout: 30_000 }, () => {
    * `secondDay()` after.
    */
   function heldRuns(firstDay: () => string, secondDay: () => string) {
-    const firstHeld = gate();
-    const releaseFirst = gate();
-    const secondHeld = gate();
-    const releaseSecond = gate();
+    const firstHeld = createGate({ name: "first run held" });
+    const releaseFirst = createGate({ name: "first run released" });
+    const secondHeld = createGate({ name: "second run held" });
+    const releaseSecond = createGate({ name: "second run released" });
     let scorecards = 0;
     const base = upstreamsWith(npmPoints(() => (scorecards === 0 ? firstDay() : secondDay())));
     stubUpstreams({
@@ -1458,8 +1442,8 @@ describe("two runs on one day at once", { timeout: 30_000 }, () => {
 
   test("a run whose completion lands after a later run confirmed a later day leaves that week, and both publish today's window", async () => {
     const LAST_WEEK = "https://api.npmjs.org/downloads/point/last-week/";
-    const firstHeld = gate();
-    const releaseFirst = gate();
+    const firstHeld = createGate({ name: "first run held" });
+    const releaseFirst = createGate({ name: "first run released" });
     let rolled = false;
     let lastWeeks = 0;
     const base = upstreamsWith(npmPoints(() => (rolled ? yesterday() : twoDaysBack())));
@@ -1506,10 +1490,10 @@ describe("two runs on one day at once", { timeout: 30_000 }, () => {
   });
 
   test("a run that keeps a confirmed week undates it before writing counts npm closed a day under, so a publish meanwhile does not date them", async () => {
-    const firstHeld = gate();
-    const releaseFirst = gate();
-    const secondHeld = gate();
-    const releaseSecond = gate();
+    const firstHeld = createGate({ name: "first run held" });
+    const releaseFirst = createGate({ name: "first run released" });
+    const secondHeld = createGate({ name: "second run held" });
+    const releaseSecond = createGate({ name: "second run released" });
     let rolled = false;
     let scorecards = 0;
     let secondVersions = 0;
@@ -1569,10 +1553,10 @@ describe("two runs on one day at once", { timeout: 30_000 }, () => {
 
   test("a completion that dates the week after npm closed a day, while another run wrote counts for the next, undates it again", async () => {
     const LAST_WEEK = "https://api.npmjs.org/downloads/point/last-week/";
-    const firstHeld = gate();
-    const releaseFirst = gate();
-    const secondHeld = gate();
-    const releaseSecond = gate();
+    const firstHeld = createGate({ name: "first run held" });
+    const releaseFirst = createGate({ name: "first run released" });
+    const secondHeld = createGate({ name: "second run held" });
+    const releaseSecond = createGate({ name: "second run released" });
     let rolled = false;
     let lastWeeks = 0;
     let secondVersions = 0;

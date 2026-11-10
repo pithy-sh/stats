@@ -26,15 +26,20 @@ Every file is served with its R2 object's ETag and `Last-Modified`, and a matchi
 
 ## Collect by hand
 
-The cron starts the collector every day under a random instance id. Every row is stamped with the UTC day it was fetched, and every write is an upsert on that day, so two runs on one day leave one set of rows and no run rewrites an earlier day's snapshot. A run may overlap another, the cron's included: neither clears the per-version week the other confirmed unless npm closed a day in between. Start a run yourself with `wrangler workflows trigger` against the environment's Workflow, `stats-<env>-api-collect`:
+The cron starts the collector every day under an instance id that is the UTC day it fired for, such as `2026-11-09`, so a second start that day is logged as already started and does not run. Every row is stamped with the UTC day it was fetched, and every write is an upsert on that day, so two runs on one day leave one set of rows and no run rewrites an earlier day's snapshot. A run may overlap another, the cron's included: neither clears the per-version week the other confirmed unless npm closed a day in between. Start a run yourself with `pithy workflow trigger`, naming the job `api/collect` (`bun run pithy workflow list --env <env>` prints it with its Workflow). A trigger without `--id` is named `manual-` and the moment it was asked for, such as `manual-20261109013000000`, never a bare date, so it never takes the day's scheduled run's id; name a run with `--id` to follow it by a name of your choosing, a new one each time, since an id already taken is refused. A failed run's error prints the refill command for its day under an id stamped with when it failed, so following it again after a refill fails is not refused:
 
 ```bash
 # Refill the daily downloads of the three days before 2026-11-08 (a package not yet collected in full gets its whole history). Every other source is captured as of today.
-bunx wrangler workflows trigger stats-prod-api-collect '{"date":"2026-11-08"}'
+bun run pithy workflow trigger api/collect --env prod --params '{"date":"2026-11-08"}' --id refill-2026-11-08
 
-# Load daily downloads from the kit's first publish, 2026-09-05. Safe to repeat.
-bunx wrangler workflows trigger stats-prod-api-collect '{"backfill":true}'
+# Load daily downloads from the kit's first publish, 2026-09-05. Safe to repeat, under a new id each time.
+bun run pithy workflow trigger api/collect --env prod --params '{"backfill":true}' --id backfill-1
+
+# Follow a run.
+bun run pithy workflow status api/collect refill-2026-11-08 --env prod
 ```
+
+`--params` is checked against the job's schema before anything starts, and `--dry-run` shows what would start. In `prod` the command asks a person to type `yes, i really want to trigger prod` first; `staging` starts without asking.
 
 The GitHub and kit steps read a fine-grained, read-only token from the Secrets Store. It is one entry every environment binds: set it once with `bun run pithy secrets create github-token`.
 

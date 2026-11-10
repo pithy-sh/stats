@@ -88,9 +88,38 @@ export const CollectJob = z
   );
 export type CollectJob = z.output<typeof CollectJob>;
 
+/**
+ * The collector's one job. A cron start is named by the UTC day it was scheduled for, so a second cron start that day
+ * asks for a taken id, which the kit logs as already started instead of running it twice. A manual trigger that names
+ * no id is named `manual-` and the moment it was asked for, never a bare day, so it never takes the day's scheduled
+ * run's id. The rows' capture-day keys stay the guard for two runs on one day under different ids.
+ */
 export const collectWorkflows: WorkflowSpecMap = {
-  collect: { binding: COLLECT_BINDING, params: CollectJob, schedule: COLLECT_CRON, className: "CollectWorkflow" },
+  collect: {
+    binding: COLLECT_BINDING,
+    params: CollectJob,
+    schedule: COLLECT_CRON,
+    instanceId: ({ firedAt, cron }) => (cron === undefined ? `manual-${idStamp(firedAt)}` : utcDay(firedAt)),
+    className: "CollectWorkflow",
+  },
 };
+
+/** The collector's `<capability>/<job>` key: the app capability `api` in pithy.config.ts declares the job `collect`. */
+export const COLLECT_JOB = "api/collect";
+
+/** `at` as the digits of its UTC ISO time to the millisecond, such as `20261109024107250`: the part of an id that is unique. */
+function idStamp(at: Date): string {
+  return at.toISOString().replace(/[^0-9]/g, "");
+}
+
+/**
+ * The command that refills `day`'s daily downloads in `environment`, for a run that failed at `failedAt`. Its instance
+ * id carries that moment, so each failure names a fresh id: a refill run that fails in turn prints a command whose id
+ * is not its own, and following it is not refused as already started.
+ */
+export function refillCommand(environment: string, day: Day, failedAt: Date): string {
+  return `bun run pithy workflow trigger ${COLLECT_JOB} --env ${environment} --params '{"date":"${day}"}' --id refill-${day}-${idStamp(failedAt)}`;
+}
 
 /**
  * What the collector needs off the Worker env: the app D1, the secrets the GitHub token is read from, the R2
@@ -199,7 +228,7 @@ export type CollectReport = z.output<typeof CollectReport>;
 
 /**
  * The UTC day a run is for: the payload's date, else the day the instance was created. The instance id is never
- * read: the kit's scheduled handler starts every instance under a random id.
+ * read: a manual trigger may name its instance anything.
  */
 export function runDay(event: CollectEvent, job: CollectJob): Day {
   return job.date ?? capturedOn(event);
@@ -590,7 +619,7 @@ export async function runCollect(
   if (failed.length > 0) {
     throw new UpstreamError({
       message: `The ${day} run could not collect: ${failed.join(", ")}.`,
-      action: `Once the upstream answers, trigger the Workflow with {"date":"${day}"}: it refills that day's daily downloads, and every other source is captured as of the day it runs, so no earlier snapshot is rewritten. The Worker's log says why each step failed.`,
+      action: `Once the upstream answers, run ${refillCommand(env.ENVIRONMENT, day, now())}: it refills that day's daily downloads, and every other source is captured as of the day it runs, so no earlier snapshot is rewritten. The Worker's log says why each step failed.`,
       detail: `Sources that completed: ${completed.join(", ") || "none"}.`,
     });
   }

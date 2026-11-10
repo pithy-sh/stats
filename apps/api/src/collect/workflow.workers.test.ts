@@ -6,6 +6,7 @@ import {
   type WorkflowInstanceModifier,
   waitOnExecutionContext,
 } from "cloudflare:test";
+import { PithyError } from "@pithy-sh/core/src/error/pithyError";
 import { sql } from "kysely";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { currentKey, snapshotKey } from "../contract/objects";
@@ -32,7 +33,14 @@ import { MAX_RANGE_DAYS, NPM_API_GAP_MS } from "./upstream/npm";
 import { clock } from "./upstream/rateLimit";
 import { type StubAnswer, type StubCall, stubFetch } from "./upstream/testing";
 import { npmHistoryStart } from "./window";
-import { COLLECT_CRON, DOWNLOAD_WINDOWS } from "./workflow";
+import {
+  COLLECT_CRON,
+  type CollectEnv,
+  type CollectStep,
+  DOWNLOAD_WINDOWS,
+  refillCommand,
+  runCollect,
+} from "./workflow";
 
 const PACKAGES = ["@pithy-sh/auth", "@pithy-sh/core"];
 /** The day every test's {@link PACKAGES} were first seen and had their history collected: they are known. */
@@ -537,6 +545,31 @@ describe("a run's day and the day it captures", () => {
     expect(output.capturedOn).toBe(output.day);
   });
 
+  test("the cron names its run by the UTC day it fired for, and a second fire that day is logged, not run", async () => {
+    stubUpstreams(upstreams());
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+    const scheduled = worker.scheduled;
+    if (scheduled === undefined) throw new Error("The Worker exports no scheduled handler.");
+    const fire = { cron: COLLECT_CRON, scheduledTime: Date.parse("2026-11-07T02:00:00Z") };
+    const workerEnv = env as unknown as Record<string, unknown>;
+
+    // Held to the end of the test: disposing an instance's introspector removes the instance.
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "2026-11-07");
+    await scheduled(fire, workerEnv, {} as ExecutionContext);
+    await instance.waitForStatus("complete");
+    const runs = lines.length;
+    await expect(scheduled(fire, workerEnv, {} as ExecutionContext)).resolves.toBeUndefined();
+
+    const already = lines.slice(runs).filter((line) => line.includes("workflow already started"));
+    expect(already).toHaveLength(1);
+    expect(already[0]).toContain('"workflow":"api/collect"');
+    expect(already[0]).toContain('"id":"2026-11-07"');
+    expect(await (await env.COLLECT.get("2026-11-07")).status()).toMatchObject({ status: "complete" });
+  });
+
   test("a cron the collector does not declare starts nothing", async () => {
     await using introspector = await introspectWorkflow(env.COLLECT);
     await worker.scheduled?.({ cron: "5 * * * *" }, env as unknown as Record<string, unknown>, {} as ExecutionContext);
@@ -626,6 +659,29 @@ describe("each source is its own step", () => {
     expect(await count("cdnLatest")).toBe(0);
     expect(await count("dependentLatest")).toBe(PACKAGES.length);
     expect(await count("repoLatest")).toBe(1);
+  });
+
+  test("a refill run that fails names a refill id other than its own, so following it again is not refused", async () => {
+    stubUpstreams(upstreams());
+    const ownId = refillCommand("dev", "2026-11-08", new Date("2026-11-09T02:41:07.250Z")).split("--id ")[1] ?? "";
+    // Runs each step's work once, failing every jsDelivr step as one that exhausted its retries would.
+    const step = {
+      do: async (name: string, _config: unknown, work: () => Promise<unknown>) => {
+        if (name.startsWith("jsdelivr")) throw new Error("jsDelivr is down");
+        return work();
+      },
+    } as unknown as CollectStep;
+    const event = { payload: { date: "2026-11-08" }, timestamp: new Date(), instanceId: ownId };
+
+    const failure = await runCollect(env as unknown as CollectEnv, event, step).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(PithyError);
+    const action = (failure as PithyError).payload.action ?? "";
+    expect(action).toContain(`--params '{"date":"2026-11-08"}' --id refill-2026-11-08-`);
+    expect(action).not.toContain(`--id ${ownId}`);
   });
 
   test("a kit count that cannot be read fails only its own step: every other source still writes and publishes", async () => {

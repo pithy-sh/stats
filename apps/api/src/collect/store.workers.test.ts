@@ -26,12 +26,12 @@ beforeEach(async () => {
 });
 
 describe("recordPackages", () => {
-  test("keeps the first day a package was seen and moves the last", async () => {
+  test("keeps the first day a package was seen and moves the last, and starts a new one with its history uncollected", async () => {
     await recordPackages(db(), ["@pithy-sh/core"], "2026-11-08");
     await recordPackages(db(), ["@pithy-sh/core", "@pithy-sh/auth"], "2026-11-09");
     expect(await db().selectFrom("packages").selectAll().orderBy("name").execute()).toEqual([
-      { name: "@pithy-sh/auth", firstSeenOn: "2026-11-09", lastSeenOn: "2026-11-09" },
-      { name: "@pithy-sh/core", firstSeenOn: "2026-11-08", lastSeenOn: "2026-11-09" },
+      { name: "@pithy-sh/auth", firstSeenOn: "2026-11-09", lastSeenOn: "2026-11-09", historyCollectedOn: null },
+      { name: "@pithy-sh/core", firstSeenOn: "2026-11-08", lastSeenOn: "2026-11-09", historyCollectedOn: null },
     ]);
   });
 
@@ -39,7 +39,7 @@ describe("recordPackages", () => {
     await recordPackages(db(), ["@pithy-sh/core"], "2026-11-09");
     await recordPackages(db(), ["@pithy-sh/core"], "2026-11-05");
     expect(await db().selectFrom("packages").selectAll().execute()).toEqual([
-      { name: "@pithy-sh/core", firstSeenOn: "2026-11-09", lastSeenOn: "2026-11-09" },
+      { name: "@pithy-sh/core", firstSeenOn: "2026-11-09", lastSeenOn: "2026-11-09", historyCollectedOn: null },
     ]);
   });
 });

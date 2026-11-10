@@ -99,10 +99,15 @@ async function writeSnapshots(
   }
 }
 
-/** Every package in the org list captured on `capturedOn`: first seen keeps its day, last seen only moves forward. */
+/**
+ * Every package in the org list captured on `capturedOn`: first seen keeps its day, last seen only moves forward, and
+ * a new package starts with its history uncollected.
+ */
 export async function recordPackages(db: StatsDatabase, names: readonly string[], capturedOn: Day): Promise<void> {
-  const rows = names.map((name) => Package.encode({ name, firstSeenOn: capturedOn, lastSeenOn: capturedOn }));
-  for (const chunk of chunkRowsByBoundParameters(rows, 3)) {
+  const rows = names.map((name) =>
+    Package.encode({ name, firstSeenOn: capturedOn, lastSeenOn: capturedOn, historyCollectedOn: null }),
+  );
+  for (const chunk of chunkRowsByBoundParameters(rows, 4)) {
     await db
       .insertInto("packages")
       .values(chunk)

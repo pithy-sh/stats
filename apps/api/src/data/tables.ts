@@ -28,6 +28,9 @@ export const Package = z
     name: PackageName,
     firstSeenOn: Day.describe("The day the package was first captured in the org's package list."),
     lastSeenOn: Day.describe("The newest day the package was captured in the org's package list."),
+    historyCollectedOn: Day.nullable().describe(
+      "The day a daily-downloads step first wrote the package's whole history, or null while none has.",
+    ),
   })
   .describe("One package the npm org publishes, in `packages`.");
 export type Package = z.output<typeof Package>;

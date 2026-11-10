@@ -8,10 +8,10 @@ describe("statsSecretRegistry", () => {
     expect(secretBindingName(GITHUB_TOKEN)).toBe("GITHUB_TOKEN");
   });
 
-  test("keeps the token in the Secrets Store, per environment, set by a person", () => {
+  test("keeps one token in the Secrets Store for every environment, set by a person", () => {
     expect(statsSecretRegistry[GITHUB_TOKEN]).toMatchObject({
       backend: "cf-secrets-store",
-      scope: "environment",
+      scope: "global",
       valueType: "text",
       origin: { kind: "obtained", issuer: "github" },
       rotation: { kind: "manual", issuer: "github" },

@@ -19,7 +19,9 @@ const Date_ = z.iso.date().describe("A UTC day, `YYYY-MM-DD`.");
 const Count = z.number().int().nonnegative();
 const Series = z.array(Count.describe("One period's count.")).describe("A series of counts, oldest first.");
 const GeneratedAt = Time.describe("When the publish step ran.");
-const AsOf = Date_.describe("The last complete day of npm downloads.");
+const AsOf = Date_.describe(
+  "The last complete day of npm downloads: the newest day held that npm had finished counting when it was collected.",
+);
 
 export const Summary = z
   .object({
@@ -104,8 +106,8 @@ const PackageVersion = z
 
 const VersionWeek = z
   .object({
-    start: Date_.describe("The window's first day."),
-    end: Date_.describe("The window's last day: the day before the capture."),
+    start: Date_.describe("The window's first day, as npm dated its `last-week` counts when they were captured."),
+    end: Date_.describe("The window's last day: npm's last complete day when the counts were captured."),
     counts: z
       .record(z.string().describe("A version."), Count.describe("Its downloads over the window."))
       .describe("npm's per-version counts over the window."),

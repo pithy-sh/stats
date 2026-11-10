@@ -8,13 +8,14 @@ export const HistoryState = z
     createdOn: Day.nullable().describe(
       "The UTC day the newest registry row says the package was created, or null when none says.",
     ),
+    newestDay: Day.nullable().describe("The newest day a daily-downloads row is held for, or null when none is."),
   })
   .describe("What one package's daily-downloads window is chosen from.");
 export type HistoryState = z.output<typeof HistoryState>;
 
 /**
  * Each of `names`' history state. A name with no package row is pending. Every package is read and filtered here,
- * so the query binds no parameter however many names there are.
+ * so no query binds a parameter however many names there are.
  */
 export async function readHistoryState(
   db: StatsDatabase,
@@ -32,8 +33,24 @@ export async function readHistoryState(
       return [row.packageName, createdAt === null ? null : utcDay(createdAt)];
     }),
   );
+  const newest = new Map(
+    (
+      await db
+        .selectFrom("dailyDownloads")
+        .select((eb) => ["packageName", eb.fn.max("day").as("newestDay")])
+        .groupBy("packageName")
+        .execute()
+    ).map((row) => [row.packageName, row.newestDay]),
+  );
   return Object.fromEntries(
-    names.map((name) => [name, { pending: (marked.get(name) ?? null) === null, createdOn: created.get(name) ?? null }]),
+    names.map((name) => [
+      name,
+      {
+        pending: (marked.get(name) ?? null) === null,
+        createdOn: created.get(name) ?? null,
+        newestDay: newest.get(name) ?? null,
+      },
+    ]),
   );
 }
 

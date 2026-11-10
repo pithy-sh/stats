@@ -8,6 +8,7 @@ import {
   DependentSnapshot,
   Issue,
   KitCount,
+  NpmCountedDays,
   Package,
   PullRequest,
   RegistrySnapshot,
@@ -17,12 +18,12 @@ import {
   VersionDownload,
   VersionPublish,
 } from "../data/tables";
-import type { Day } from "./day";
+import type { Day, DayRange } from "./day";
 import type { KitCounts } from "./kit/count";
 import type { Dependents, Scorecard } from "./upstream/depsDev";
 import type { GitHubCommit, GitHubIssue, GitHubPullRequest, RepoStats } from "./upstream/github";
 import type { CdnStats } from "./upstream/jsdelivr";
-import type { RegistryFacts, DailyDownload as UpstreamDailyDownload } from "./upstream/npm";
+import type { NpmDays, RegistryFacts, DailyDownload as UpstreamDailyDownload } from "./upstream/npm";
 
 /**
  * Every write the collector makes. Each is an upsert on the table's natural key, so writing the same capture
@@ -140,6 +141,25 @@ export async function writeVersionDownloads(
     VersionDownload.encode({ packageName, version, capturedOn, downloads }),
   );
   await upsertRows(db, "versionDownloads", ["packageName", "version", "capturedOn"], rows);
+}
+
+/**
+ * Which day npm had last finished counting when asked on `capturedOn`, with no week yet: {@link writeNpmWeek} records
+ * that once the day's per-version counts are known to cover it. A second answer that day replaces the first, week
+ * included, since that run captures the per-version counts again.
+ */
+export async function writeNpmDays(db: StatsDatabase, days: NpmDays, capturedOn: Day): Promise<void> {
+  const row = NpmCountedDays.encode({ capturedOn, lastDay: days.lastDay, weekStart: null, weekEnd: null });
+  await upsertRows(db, "npmDays", ["capturedOn"], [row]);
+}
+
+/** The week npm's `last-week` covered on `capturedOn`, which every per-version count captured that day covers. */
+export async function writeNpmWeek(db: StatsDatabase, week: DayRange, capturedOn: Day): Promise<void> {
+  await db
+    .updateTable("npmDays")
+    .set({ weekStart: week.start, weekEnd: week.end })
+    .where("capturedOn", "=", capturedOn)
+    .execute();
 }
 
 /** One package's registry facts: every version's publish time, and the dated and latest snapshot. */

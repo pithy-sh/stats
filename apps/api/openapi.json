@@ -744,7 +744,7 @@
                       "type": "string",
                       "format": "date",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                      "description": "The last complete day of npm downloads."
+                      "description": "The last complete day of npm downloads: the newest day held that npm had finished counting when it was collected."
                     },
                     "downloads": {
                       "type": "object",
@@ -1192,7 +1192,7 @@
                       "type": "string",
                       "format": "date",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                      "description": "The last complete day of npm downloads."
+                      "description": "The last complete day of npm downloads: the newest day held that npm had finished counting when it was collected."
                     },
                     "downloads": {
                       "type": "object",
@@ -1629,7 +1629,7 @@
                       "type": "string",
                       "format": "date",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                      "description": "The last complete day of npm downloads."
+                      "description": "The last complete day of npm downloads: the newest day held that npm had finished counting when it was collected."
                     },
                     "sources": {
                       "type": "object",
@@ -1952,13 +1952,13 @@
                                   "type": "string",
                                   "format": "date",
                                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                                  "description": "The window's first day."
+                                  "description": "The window's first day, as npm dated its `last-week` counts when they were captured."
                                 },
                                 "end": {
                                   "type": "string",
                                   "format": "date",
                                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                                  "description": "The window's last day: the day before the capture."
+                                  "description": "The window's last day: npm's last complete day when the counts were captured."
                                 },
                                 "counts": {
                                   "type": "object",
@@ -2907,7 +2907,7 @@
                       "type": "string",
                       "format": "date",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                      "description": "The last complete day of npm downloads."
+                      "description": "The last complete day of npm downloads: the newest day held that npm had finished counting when it was collected."
                     },
                     "sources": {
                       "type": "object",
@@ -3230,13 +3230,13 @@
                                   "type": "string",
                                   "format": "date",
                                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                                  "description": "The window's first day."
+                                  "description": "The window's first day, as npm dated its `last-week` counts when they were captured."
                                 },
                                 "end": {
                                   "type": "string",
                                   "format": "date",
                                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$",
-                                  "description": "The window's last day: the day before the capture."
+                                  "description": "The window's last day: npm's last complete day when the counts were captured."
                                 },
                                 "counts": {
                                   "type": "object",

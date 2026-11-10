@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
 import { statsDatabase } from "../data/tables";
 import { freshDatabase } from "../data/testing";
+import { addDays } from "./day";
 import {
   recordCollected,
   recordPackages,
@@ -11,6 +12,8 @@ import {
   writeDependents,
   writeIssues,
   writeKitCount,
+  writeNpmDays,
+  writeNpmWeek,
   writePullRequests,
   writeRegistry,
   writeRepo,
@@ -365,5 +368,34 @@ describe("writeKitCount", () => {
     await expect(
       writeKitCount(db(), "pithy-sh/pithy", "abc123", { tests: 1, codeLines: 1 }, "2026-11-09", new Date()),
     ).rejects.toThrow();
+  });
+});
+
+describe("writeNpmDays", () => {
+  const npm = (lastDay: string) => ({
+    package: "@pithy-sh/core",
+    lastDay,
+    lastWeek: { start: addDays(lastDay, -6), end: lastDay },
+  });
+
+  test("keeps one row per capture day, with no week until one is confirmed, and a second run that day replaces it", async () => {
+    await writeNpmDays(db(), npm("2026-11-07"), "2026-11-09");
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
+    await writeNpmDays(db(), npm("2026-11-09"), "2026-11-10");
+    expect(await db().selectFrom("npmDays").selectAll().orderBy("capturedOn").execute()).toEqual([
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: null, weekEnd: null },
+      { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: null, weekEnd: null },
+    ]);
+  });
+
+  test("writeNpmWeek dates only its own capture day", async () => {
+    await writeNpmDays(db(), npm("2026-11-07"), "2026-11-09");
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
+    expect(await db().selectFrom("npmDays").selectAll().orderBy("capturedOn").execute()).toEqual([
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: null, weekEnd: null },
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
+    ]);
   });
 });

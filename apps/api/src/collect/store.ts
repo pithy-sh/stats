@@ -145,20 +145,79 @@ export async function writeVersionDownloads(
 
 /**
  * Which day npm had last finished counting when asked on `capturedOn`, with no week yet: {@link writeNpmWeek} records
- * that once the day's per-version counts are known to cover it. A second answer that day replaces the first, week
- * included, since that run captures the per-version counts again.
+ * that once the day's per-version counts are known to cover it. A later day replaces an earlier one, and an earlier day
+ * changes nothing, since a run told of an older day is the stale one. A week already recorded is kept when it ends on
+ * the day the row then names, since the counts any run captures for that day cover the same seven days, so a publish
+ * running meanwhile still dates them; it is cleared when it does not, since the counts the run told of a later day
+ * rewrites cover a later week.
  */
 export async function writeNpmDays(db: StatsDatabase, days: NpmDays, capturedOn: Day): Promise<void> {
   const row = NpmCountedDays.encode({ capturedOn, lastDay: days.lastDay, weekStart: null, weekEnd: null });
-  await upsertRows(db, "npmDays", ["capturedOn"], [row]);
+  const newest = sql<string>`max(${sql.ref("npmDays.lastDay")}, ${sql.ref("excluded.lastDay")})`;
+  const keptOrCleared = (column: "weekStart" | "weekEnd") =>
+    sql<
+      string | null
+    >`case when ${sql.ref("npmDays.weekEnd")} = ${newest} then ${sql.ref(`npmDays.${column}`)} else null end`;
+  await db
+    .insertInto("npmDays")
+    .values(row)
+    .onConflict((oc) =>
+      oc.column("capturedOn").doUpdateSet({
+        lastDay: newest,
+        weekStart: keptOrCleared("weekStart"),
+        weekEnd: keptOrCleared("weekEnd"),
+      }),
+    )
+    .execute();
 }
 
-/** The week npm's `last-week` covered on `capturedOn`, which every per-version count captured that day covers. */
+/**
+ * The week npm's `last-week` covered on `capturedOn`, which every per-version count captured that day covers. Written
+ * only when it ends on the last day recorded for `capturedOn`: a run told of a later day has replaced those counts.
+ */
 export async function writeNpmWeek(db: StatsDatabase, week: DayRange, capturedOn: Day): Promise<void> {
   await db
     .updateTable("npmDays")
     .set({ weekStart: week.start, weekEnd: week.end })
     .where("capturedOn", "=", capturedOn)
+    .where("lastDay", "=", week.end)
+    .execute();
+}
+
+/** The week recorded for `capturedOn`, which a publish dates that day's per-version counts by; null when none is. */
+export async function readNpmWeek(db: StatsDatabase, capturedOn: Day): Promise<DayRange | null> {
+  const row = await db.selectFrom("npmDays").selectAll().where("capturedOn", "=", capturedOn).executeTakeFirst();
+  if (row === undefined) return null;
+  const { weekStart, weekEnd } = NpmCountedDays.decode(row);
+  return weekStart === null || weekEnd === null ? null : { start: weekStart, end: weekEnd };
+}
+
+/**
+ * `capturedOn` has no known week: a run told npm had last counted `lastDay` rewrote per-version counts that day while
+ * npm closed a day, so some may cover one week and some the next. Cleared only while the row still names `lastDay`:
+ * once a run told of a later day has moved it, that run's own completion dates the counts. The captures stay in D1 and
+ * are not published until a run that day confirms a week.
+ */
+export async function clearNpmWeek(db: StatsDatabase, lastDay: Day, capturedOn: Day): Promise<void> {
+  await db
+    .updateTable("npmDays")
+    .set({ weekStart: null, weekEnd: null })
+    .where("capturedOn", "=", capturedOn)
+    .where("lastDay", "=", lastDay)
+    .execute();
+}
+
+/**
+ * `capturedOn` no longer has `week`: counts covering another week are about to be written for that day. Cleared only
+ * while the row still records `week`, so a week another run has since confirmed stays.
+ */
+export async function undateNpmWeek(db: StatsDatabase, week: DayRange, capturedOn: Day): Promise<void> {
+  await db
+    .updateTable("npmDays")
+    .set({ weekStart: null, weekEnd: null })
+    .where("capturedOn", "=", capturedOn)
+    .where("weekStart", "=", week.start)
+    .where("weekEnd", "=", week.end)
     .execute();
 }
 

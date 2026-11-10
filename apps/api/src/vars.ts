@@ -8,8 +8,9 @@ const MINUTES_PER_DAY = 1440;
 
 /**
  * This Worker's own vars. `pithy worker sync` writes each into the top level and every `env.<name>` of wrangler.jsonc,
- * and the Worker reads them with `VARS.read(env)`, which hands back the default for one missing or invalid. A value set
- * as text is read as JSON when the schema refuses it, so `READY_AFTER_MINUTES` takes `" 15"`, `"15.0"` or `"1e1"`.
+ * and the Worker reads them with `VARS.read(env)`, which hands back the default for one missing or invalid. A number set
+ * as text is taken only as a plain decimal, so `READY_AFTER_MINUTES` reads `"15"` and `"15.0"` as 15 and falls back on
+ * `" 15"`, `"1e1"`, `"0x10"` or `""`.
  */
 export const VARS = defineVars({
   READY_AFTER_MINUTES: {

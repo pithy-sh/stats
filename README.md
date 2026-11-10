@@ -36,7 +36,7 @@ bunx wrangler workflows trigger stats-prod-api-collect '{"date":"2026-11-08"}'
 bunx wrangler workflows trigger stats-prod-api-collect '{"backfill":true}'
 ```
 
-The GitHub and kit steps read a fine-grained, read-only token from the Secrets Store. Set it once per environment with `bun run pithy secrets create github-token --env staging` and `--env prod`.
+The GitHub and kit steps read a fine-grained, read-only token from the Secrets Store. It is one entry every environment binds: set it once with `bun run pithy secrets create github-token`.
 
 ## Develop
 

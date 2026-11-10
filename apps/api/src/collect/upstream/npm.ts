@@ -2,6 +2,17 @@ import { z } from "zod";
 import { Day, type DayRange, dayRanges } from "../day";
 import { type Fetcher, requestJson, requestJsonOrNull } from "./http";
 
+/** The host of npm's downloads API, the one upstream the collector paces. */
+export const NPM_API_HOST = "api.npmjs.org";
+
+/**
+ * The least time between two requests to npm's downloads API. Measured on 2026-11-09: sent back to back, the 21st
+ * request answered 429 with `retry-after: 0`, about three seconds in, and the limit took 25 to 30 seconds to
+ * clear. Two seconds apart, the 21st was still refused, 43 seconds in; four seconds apart, 27 requests in a row
+ * all answered. So the limit is about twenty requests a minute, and four seconds keeps a quarter under it.
+ */
+export const NPM_API_GAP_MS = 4000;
+
 /** npm's downloads API serves at most eighteen months per request; a year keeps well inside it. */
 const MAX_RANGE_DAYS = 365;
 

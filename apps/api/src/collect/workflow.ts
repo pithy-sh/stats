@@ -1,5 +1,7 @@
 import type { WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import { UpstreamError } from "@pithy-sh/core/src/error/pithyError";
+import type { Logger } from "@pithy-sh/core/src/logger/logger";
+import { createWorkerLogger } from "@pithy-sh/core/src/logger/worker";
 import type { WorkflowSpecMap } from "@pithy-sh/core/src/workflow/spec";
 import type { SecretsStoreEnv } from "@pithy-sh/secrets/src/env/bindings";
 import { secretsStore } from "@pithy-sh/secrets/src/secretsStore";
@@ -9,6 +11,7 @@ import { GITHUB_TOKEN, statsSecretRegistry } from "../secret/registry";
 import { Day, downloadWindow, utcDay } from "./day";
 import { countTarball } from "./kit/source";
 import { publish } from "./publish/publish";
+import { loggedStep } from "./step";
 import {
   recordCollected,
   recordPackages,
@@ -24,6 +27,7 @@ import {
   writeScorecard,
   writeVersionDownloads,
 } from "./store";
+import { upstreamFetcher } from "./upstream/client";
 import { fetchDependents, fetchScorecard } from "./upstream/depsDev";
 import {
   fetchBranchHead,
@@ -71,10 +75,12 @@ export const collectWorkflows: WorkflowSpecMap = {
 };
 
 /**
- * What the collector needs off the Worker env: the app D1, the secrets the GitHub token is read from, and the R2
- * bucket the publish step writes to.
+ * What the collector needs off the Worker env: the app D1, the secrets the GitHub token is read from, the R2
+ * bucket the publish step writes to, and the environment's name.
  */
 export interface CollectEnv extends SecretsStoreEnv {
+  /** The environment's name, which every log record the run writes carries. wrangler.jsonc sets it per environment. */
+  ENVIRONMENT: string;
   DB: D1Database;
   PUBLISHED: R2Bucket;
 }
@@ -95,6 +101,16 @@ export const SOURCE_STEP = {
   timeout: "10 minutes",
 } as const satisfies WorkflowStepConfig;
 
+/**
+ * One package's step, or one other subject's. Fewer and shorter retries than a whole source's, because a source
+ * runs one of these per package in turn: a rate limit is already retried in place inside the step, so what is
+ * left for these is an upstream that is failing outright.
+ */
+export const SUBJECT_STEP = {
+  retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
+  timeout: "10 minutes",
+} as const satisfies WorkflowStepConfig;
+
 /** The publish step: a retry rebuilds both files from D1 and rewrites them, so it can safely run again. */
 export const PUBLISH_STEP = {
   retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
@@ -104,7 +120,10 @@ export const PUBLISH_STEP = {
 /** The publish step's name. It runs once every source step has finished, whether or not each succeeded. */
 export const PUBLISH = "publish";
 
-/** The step names, which are also how a run's sources are named in its report and its failure. */
+/**
+ * Each source's name: its step's, or for a source that runs per subject, the prefix of each subject's step and the
+ * name of the step that records it complete. Also how a run's sources are named in its report and its failure.
+ */
 export const STEPS = {
   packages: "package list",
   registry: "registry",
@@ -122,8 +141,8 @@ export const CollectReport = z
     capturedOn: Day.describe("The UTC day the run fetched on, which every row it wrote is stamped with."),
     packages: z.number().int().nonnegative().describe("Packages in the org's list."),
     rows: z
-      .record(z.string().describe("A step name."), z.number().int().nonnegative().describe("Rows it wrote."))
-      .describe("Rows each source step wrote."),
+      .record(z.string().describe("A source name."), z.number().int().nonnegative().describe("Rows its steps wrote."))
+      .describe("Rows each source wrote, a failed source's included."),
     published: z
       .record(z.string().describe("An R2 key."), z.number().int().nonnegative().describe("Bytes written."))
       .describe("What the publish step wrote to R2."),
@@ -149,17 +168,26 @@ export function capturedOn(event: CollectEvent): Day {
   return utcDay(event.timestamp);
 }
 
-/** Run `each` over `items` in order and add up the rows it reports. */
-async function sum<T>(items: readonly T[], each: (item: T) => Promise<number>): Promise<number> {
-  let total = 0;
-  for (const item of items) total += await each(item);
-  return total;
-}
+/** Each source by its key in `STEPS`, the package list aside. Also the key its completion is recorded under. */
+type SourceKey = Exclude<keyof typeof STEPS, "packages">;
 
 /**
- * Each source as one unit of work: fetch, then write, inside its own step. Each answers the rows it wrote.
- * Only daily downloads read `day`, because only they come from a dated historical API; everything is
- * stamped with `today`, the day it was fetched. The kit's count records `now()` as when it was taken.
+ * One source's work, each part answering the rows it wrote. `whole` runs as one step named for the source, which
+ * records the source complete. `each` runs one step per subject, named `<source> <subject>`, and then a step named
+ * for the source that records it complete once every subject has written.
+ */
+type SourceWork =
+  | { whole: () => Promise<number> }
+  | { each: ReadonlyArray<readonly [subject: string, run: () => Promise<number>]> };
+
+/** The subject of deps.dev's one step that is not a package: the repository's Scorecard. */
+export const SCORECARD_SUBJECT = "scorecard";
+
+/**
+ * Each source as units of work: fetch, then write. A source that loops over packages does one step per package, so
+ * a package that fails does not redo the ones that wrote. Only daily downloads read `day`, because only they come
+ * from a dated historical API; everything is stamped with `today`, the day it was fetched. The kit's count records
+ * `now()` as when it was taken.
  */
 function sources(
   db: StatsDatabase,
@@ -170,83 +198,159 @@ function sources(
   packages: readonly string[],
   job: CollectJob,
   now: () => Date,
-): Record<Exclude<keyof typeof STEPS, "packages">, () => Promise<number>> {
+): Record<SourceKey, SourceWork> {
+  const perPackage = (run: (name: string) => Promise<number>): SourceWork => ({
+    each: packages.map((name) => [name, () => run(name)] as const),
+  });
+  const window = downloadWindow(day, job.backfill === true ? FIRST_PUBLISH_DAY : undefined);
   return {
-    registry: () =>
-      sum(packages, async (name) => {
-        const facts = await fetchRegistry(fetcher, name);
-        await writeRegistry(db, name, facts, today);
-        return facts.versions.length + 1;
-      }),
-    dailyDownloads: () => {
-      const window = downloadWindow(day, job.backfill === true ? FIRST_PUBLISH_DAY : undefined);
-      return sum(packages, async (name) => {
-        const days = await fetchDailyDownloads(fetcher, name, window);
-        await writeDailyDownloads(db, name, days, today);
-        return days.length;
-      });
+    registry: perPackage(async (name) => {
+      const facts = await fetchRegistry(fetcher, name);
+      await writeRegistry(db, name, facts, today);
+      return facts.versions.length + 1;
+    }),
+    dailyDownloads: perPackage(async (name) => {
+      const days = await fetchDailyDownloads(fetcher, name, window);
+      await writeDailyDownloads(db, name, days, today);
+      return days.length;
+    }),
+    versionDownloads: perPackage(async (name) => {
+      const counts = await fetchVersionDownloads(fetcher, name);
+      await writeVersionDownloads(db, name, counts, today);
+      return Object.keys(counts).length;
+    }),
+    github: {
+      whole: async () => {
+        // Read inside the step, so the token is never a step's returned value and never leaves this closure.
+        const token = (await secretsStore(env, statsSecretRegistry)).get(GITHUB_TOKEN);
+        const stats = await fetchRepoStats(fetcher, token, KIT_REPO);
+        const issues = await fetchIssues(fetcher, token, KIT_REPO);
+        const pullRequests = await fetchPullRequests(fetcher, token, KIT_REPO);
+        const commits = await fetchCommits(fetcher, token, KIT_REPO);
+        await writeRepo(db, KIT_REPO, stats, today);
+        await writeIssues(db, KIT_REPO, issues, today);
+        await writePullRequests(db, KIT_REPO, pullRequests, today);
+        await writeCommits(db, KIT_REPO, commits);
+        return 1 + issues.length + pullRequests.length + commits.length;
+      },
     },
-    versionDownloads: () =>
-      sum(packages, async (name) => {
-        const counts = await fetchVersionDownloads(fetcher, name);
-        await writeVersionDownloads(db, name, counts, today);
-        return Object.keys(counts).length;
-      }),
-    github: async () => {
-      // Read inside the step, so the token is never a step's returned value and never leaves this closure.
-      const token = (await secretsStore(env, statsSecretRegistry)).get(GITHUB_TOKEN);
-      const stats = await fetchRepoStats(fetcher, token, KIT_REPO);
-      const issues = await fetchIssues(fetcher, token, KIT_REPO);
-      const pullRequests = await fetchPullRequests(fetcher, token, KIT_REPO);
-      const commits = await fetchCommits(fetcher, token, KIT_REPO);
-      await writeRepo(db, KIT_REPO, stats, today);
-      await writeIssues(db, KIT_REPO, issues, today);
-      await writePullRequests(db, KIT_REPO, pullRequests, today);
-      await writeCommits(db, KIT_REPO, commits);
-      return 1 + issues.length + pullRequests.length + commits.length;
+    kit: {
+      whole: async () => {
+        const token = (await secretsStore(env, statsSecretRegistry)).get(GITHUB_TOKEN);
+        // Resolved first, so the row names the exact commit counted even if the branch moves during the download.
+        const commit = await fetchBranchHead(fetcher, token, KIT_REPO, KIT_BRANCH);
+        const counts = await countTarball(await fetchTarball(fetcher, token, KIT_REPO, commit));
+        await writeKitCount(db, KIT_REPO, commit, counts, today, now());
+        return 1;
+      },
     },
-    kit: async () => {
-      const token = (await secretsStore(env, statsSecretRegistry)).get(GITHUB_TOKEN);
-      // Resolved first, so the row names the exact commit counted even if the branch moves during the download.
-      const commit = await fetchBranchHead(fetcher, token, KIT_REPO, KIT_BRANCH);
-      const counts = await countTarball(await fetchTarball(fetcher, token, KIT_REPO, commit));
-      await writeKitCount(db, KIT_REPO, commit, counts, today, now());
+    jsdelivr: perPackage(async (name) => {
+      const stats = await fetchCdnStats(fetcher, name);
+      if (stats === null) return 0;
+      await writeCdn(db, name, stats, today);
       return 1;
-    },
-    jsdelivr: () =>
-      sum(packages, async (name) => {
-        const stats = await fetchCdnStats(fetcher, name);
-        if (stats === null) return 0;
-        await writeCdn(db, name, stats, today);
-        return 1;
-      }),
-    depsDev: async () => {
-      const dependents = await sum(packages, async (name) => {
-        const counts = await fetchDependents(fetcher, name);
-        if (counts === null) return 0;
-        await writeDependents(db, name, counts, today);
-        return 1;
-      });
-      const scorecard = await fetchScorecard(fetcher, KIT_REPO);
-      if (scorecard !== null) await writeScorecard(db, KIT_REPO, scorecard, today);
-      return dependents + (scorecard === null ? 0 : 1);
+    }),
+    depsDev: {
+      each: [
+        ...packages.map(
+          (name) =>
+            [
+              name,
+              async () => {
+                const counts = await fetchDependents(fetcher, name);
+                if (counts === null) return 0;
+                await writeDependents(db, name, counts, today);
+                return 1;
+              },
+            ] as const,
+        ),
+        [
+          SCORECARD_SUBJECT,
+          async () => {
+            const scorecard = await fetchScorecard(fetcher, KIT_REPO);
+            if (scorecard === null) return 0;
+            await writeScorecard(db, KIT_REPO, scorecard, today);
+            return 1;
+          },
+        ] as const,
+      ],
     },
   };
+}
+
+/** What running one source came to. */
+interface SourceOutcome {
+  /** Rows its steps wrote, a failed source's included. */
+  rows: number;
+  /** Null when it completed; otherwise how the run's failure names it. */
+  failure: string | null;
+}
+
+/**
+ * Run one source's steps. A per-subject source tries every subject however many fail before it, so one that answers
+ * still writes, and its failure names each subject that did not. Only once every subject has written does its
+ * completion step run.
+ */
+async function runSource(
+  step: CollectStep,
+  log: Logger,
+  db: StatsDatabase,
+  source: SourceKey,
+  work: SourceWork,
+  now: () => Date,
+): Promise<SourceOutcome> {
+  const name = STEPS[source];
+  const complete = async (written: number): Promise<number> => {
+    await recordCollected(db, source, now());
+    return written;
+  };
+  if ("whole" in work) {
+    try {
+      return {
+        rows: await loggedStep(step, log, name, SOURCE_STEP, async () => complete(await work.whole())),
+        failure: null,
+      };
+    } catch {
+      return { rows: 0, failure: name };
+    }
+  }
+
+  let rows = 0;
+  const failed: string[] = [];
+  for (const [subject, run] of work.each) {
+    try {
+      rows += await loggedStep(step, log, `${name} ${subject}`, SUBJECT_STEP, run);
+    } catch {
+      failed.push(subject);
+    }
+  }
+  if (failed.length > 0) return { rows, failure: `${name} (${failed.join(", ")})` };
+  try {
+    await loggedStep(step, log, name, SOURCE_STEP, () => complete(0));
+    return { rows, failure: null };
+  } catch {
+    return { rows, failure: name };
+  }
 }
 
 /**
  * One collector run, the body behind `CollectWorkflow`.
  *
  * The package list comes first, because every per-package source needs it; if it cannot be read, nothing
- * else can run and the run fails. Every other source is its own step with its own retries, and one that
- * exhausts them does not stop the rest: the remaining sources still run and write, and the run then fails
- * naming the sources that did not, so it shows as errored and can be re-run.
+ * else can run and the run fails. Every other source runs in its own steps with their own retries: one step for a
+ * source about the repository, one per package for a source about packages. A step that exhausts its retries does
+ * not stop the rest: the remaining packages and sources still run and write, and the run then fails naming the
+ * sources and packages that did not, so it shows as errored and can be re-run. With the kit's 27 packages that is
+ * about 145 steps, well under the runtime's limit per instance.
+ *
+ * Every request goes through one {@link upstreamFetcher}, which paces npm's downloads API and retries a rate limit
+ * in place, and every step that throws logs why through `log` before the runtime retries it.
  *
  * Every write is an upsert keyed by the day it was captured, so two runs on one day leave one set of rows,
  * and a run for an earlier date refills that date's daily downloads without rewriting any earlier snapshot.
  *
- * Each step that succeeds records when it finished, inside the step, so a failed one keeps its last good time.
- * Once every source step has finished, the publish step builds the JSON from D1 and writes it to R2, so a source
+ * A source that completes records when it did, inside its last step, so a failed one keeps its last good time.
+ * Once every source has finished, the publish step builds the JSON from D1 and writes it to R2, so a source
  * that failed is published with its last good data and its old time.
  */
 export async function runCollect(
@@ -255,14 +359,16 @@ export async function runCollect(
   step: CollectStep,
   fetcher: Fetcher = runtimeFetch,
   now: () => Date = () => new Date(),
+  log: Logger = createWorkerLogger({ name: "collect" }),
 ): Promise<CollectReport> {
   const job = CollectJob.parse(event.payload ?? {});
   const day = runDay(event, job);
   const today = capturedOn(event);
   const db = statsDatabase(env.DB);
+  const upstream = upstreamFetcher(fetcher);
 
-  const packages = await step.do(STEPS.packages, SOURCE_STEP, async () => {
-    const names = await fetchOrgPackages(fetcher, KIT_ORG);
+  const packages = await loggedStep(step, log, STEPS.packages, SOURCE_STEP, async () => {
+    const names = await fetchOrgPackages(upstream, KIT_ORG);
     await recordPackages(db, names, today);
     await recordCollected(db, "packages", now());
     return names;
@@ -270,27 +376,24 @@ export async function runCollect(
 
   const rows: Record<string, number> = {};
   const failed: string[] = [];
-  for (const [source, run] of Object.entries(sources(db, env, fetcher, day, today, packages, job, now))) {
-    const name = STEPS[source as keyof typeof STEPS];
-    try {
-      rows[name] = await step.do(name, SOURCE_STEP, async () => {
-        const written = await run();
-        await recordCollected(db, source, now());
-        return written;
-      });
-    } catch {
-      // The step's own error is recorded on the instance by the runtime; the run carries on to the next source.
-      failed.push(name);
-    }
+  const completed: string[] = [];
+  const work = sources(db, env, upstream, day, today, packages, job, now);
+  for (const source of Object.keys(work) as SourceKey[]) {
+    const outcome = await runSource(step, log, db, source, work[source], now);
+    rows[STEPS[source]] = outcome.rows;
+    if (outcome.failure === null) completed.push(STEPS[source]);
+    else failed.push(outcome.failure);
   }
 
-  const published = await step.do(PUBLISH, PUBLISH_STEP, () => publish(db, env.PUBLISHED, KIT_REPO, today, now()));
+  const published = await loggedStep(step, log, PUBLISH, PUBLISH_STEP, () =>
+    publish(db, env.PUBLISHED, KIT_REPO, today, now()),
+  );
 
   if (failed.length > 0) {
     throw new UpstreamError({
       message: `The ${day} run could not collect: ${failed.join(", ")}.`,
-      action: `Once the upstream answers, trigger the Workflow with {"date":"${day}"}: it refills that day's daily downloads, and every other source is captured as of the day it runs, so no earlier snapshot is rewritten.`,
-      detail: `Sources that wrote: ${Object.keys(rows).join(", ") || "none"}.`,
+      action: `Once the upstream answers, trigger the Workflow with {"date":"${day}"}: it refills that day's daily downloads, and every other source is captured as of the day it runs, so no earlier snapshot is rewritten. The Worker's log says why each step failed.`,
+      detail: `Sources that completed: ${completed.join(", ") || "none"}.`,
     });
   }
   return { day, capturedOn: today, packages: packages.length, rows, published };

@@ -1,4 +1,4 @@
-import { PithyError } from "@pithy-sh/core/src/error/pithyError";
+import { PithyError, UpstreamError } from "@pithy-sh/core/src/error/pithyError";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import { requestJson, requestJsonOrNull, requestJsonWithHeaders, requestStream, USER_AGENT } from "./http";
@@ -54,6 +54,20 @@ describe("requestJson", () => {
     }).catch((caught: unknown) => caught);
     expect(JSON.stringify((error as PithyError).payload)).not.toContain("sekrit");
     expect((error as PithyError).message).not.toContain("sekrit");
+  });
+});
+
+describe("a fetcher that throws an upstream error itself", () => {
+  test("surfaces it unchanged, so its detail is not replaced by a bare 'did not answer'", async () => {
+    const thrown = new UpstreamError({ detail: "GET https://up.test/a answered 429 on each of 6 attempts." });
+    const error = await requestJson(
+      async () => {
+        throw thrown;
+      },
+      "https://up.test/a",
+      Shape,
+    ).catch((caught: unknown) => caught);
+    expect(error).toBe(thrown);
   });
 });
 

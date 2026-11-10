@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { createEntrypoint } from "@pithy-sh/core/src/createEntrypoint";
+import { bindWorkflowContext, createWorkerLogger } from "@pithy-sh/core/src/logger/worker";
 import config from "../pithy.config";
 import { type CollectEnv, type CollectReport, runCollect } from "./collect/workflow";
 
@@ -16,6 +17,11 @@ export default createEntrypoint(config);
  */
 export class CollectWorkflow extends WorkflowEntrypoint<CollectEnv, unknown> {
   override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<CollectReport> {
-    return await runCollect(this.env, event, step);
+    const log = bindWorkflowContext(createWorkerLogger({ name: "collect" }), {
+      workflow: event.workflowName,
+      instance: event.instanceId,
+      env: this.env.ENVIRONMENT,
+    });
+    return await runCollect(this.env, event, step, undefined, undefined, log);
   }
 }

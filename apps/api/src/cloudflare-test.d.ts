@@ -5,6 +5,7 @@
 // as something real — the one shape of test failure that looks like a bug in your code.
 declare namespace Cloudflare {
   interface Env {
+    ENVIRONMENT: string;
     DB: D1Database;
     PUBLISHED: R2Bucket;
     COLLECT: Workflow;

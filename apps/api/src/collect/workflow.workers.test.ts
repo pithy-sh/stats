@@ -22,6 +22,8 @@ import {
   writeCdn,
   writeDailyDownloads,
   writeDependents,
+  writeNpmDays,
+  writeNpmWeek,
   writeRegistry,
   writeRepo,
   writeVersionDownloads,
@@ -1116,10 +1118,12 @@ describe("npm's last complete day", { timeout: 30_000 }, () => {
     const lastDay = addDays(capturedOn, -2);
 
     // Asked once per run, for one package, before any package's version or daily downloads, through the paced client;
-    // last-week is asked again once every package's per-version counts are in, before any daily downloads.
+    // last-week is asked twice more once every package's per-version counts are in, before and after dating them,
+    // both before any daily downloads.
     const points = stub.calls.filter((call) => call.url.startsWith(POINTS)).map((call) => call.url);
     expect(points).toEqual([
       `${POINTS}last-day/${PACKAGES[0]}`,
+      `${POINTS}last-week/${PACKAGES[0]}`,
       `${POINTS}last-week/${PACKAGES[0]}`,
       `${POINTS}last-week/${PACKAGES[0]}`,
     ]);
@@ -1263,5 +1267,343 @@ describe("npm's last complete day", { timeout: 30_000 }, () => {
     expect(days.map((row) => row.day)).toEqual([-8, -7, -6, -5, -4, -3, -2, -1].map((back) => addDays(today(), back)));
     const latest = Latest.parse(await published(currentKey("latest")));
     expect(latest.asOf).toBe(yesterday());
+  });
+});
+
+/**
+ * A flag one side sets and the other waits on. The wait polls on its own timer rather than awaiting a promise the other
+ * side settles: a Workflow step and the test run in separate request contexts, and the runtime takes a step waiting on
+ * the test's promise for a hung request.
+ */
+function gate(): { open: () => void; opened: () => Promise<void> } {
+  let open = false;
+  return {
+    open: () => {
+      open = true;
+    },
+    opened: async () => {
+      while (!open) await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+  };
+}
+
+// Two instances run side by side, each held at one request until the test lets it through.
+describe("two runs on one day at once", { timeout: 30_000 }, () => {
+  const VERSIONS = "https://api.npmjs.org/versions/";
+  const SCORECARD = "https://api.deps.dev/v3/projects/";
+  /** Two days before the day the test runs on. */
+  const twoDaysBack = () => addDays(today(), -2);
+  const week = (lastDay: string) => ({ start: addDays(lastDay, -6), end: lastDay });
+
+  /**
+   * Upstreams for two runs started one after the other. The first waits at its last request before publishing, the
+   * second at its first per-version request, by when its download-windows step has written today's npm row, as the
+   * 02:00 cron did over a manual run. npm names `firstDay()` as its last complete day until the first run is held, and
+   * `secondDay()` after.
+   */
+  function heldRuns(firstDay: () => string, secondDay: () => string) {
+    const firstHeld = gate();
+    const releaseFirst = gate();
+    const secondHeld = gate();
+    const releaseSecond = gate();
+    let scorecards = 0;
+    const base = upstreamsWith(npmPoints(() => (scorecards === 0 ? firstDay() : secondDay())));
+    stubUpstreams({
+      calls: base.calls,
+      fetch: async (url, init) => {
+        if (url.startsWith(SCORECARD) && ++scorecards === 1) {
+          firstHeld.open();
+          await releaseFirst.opened();
+        }
+        if (url.startsWith(VERSIONS) && scorecards > 0) {
+          secondHeld.open();
+          await releaseSecond.opened();
+        }
+        return base.fetch(url, init);
+      },
+    });
+    return { firstHeld, releaseFirst, secondHeld, releaseSecond };
+  }
+
+  /** The versionWeeks every package is published with now. */
+  async function publishedWeeks(): Promise<unknown[]> {
+    const latest = Latest.parse(await published(currentKey("latest")));
+    expect(latest.packages).toHaveLength(PACKAGES.length);
+    return latest.packages.map((row) => row.versionWeeks);
+  }
+
+  const COUNTS = { "0.1.0": 3, "0.2.0": 30 };
+
+  test("a run that starts before another publishes keeps the week that one confirmed, and both publish today's windows", async () => {
+    const runs = heldRuns(yesterday, yesterday);
+    await using first = await introspectWorkflowInstance(env.COLLECT, "overlap-first");
+    await using second = await introspectWorkflowInstance(env.COLLECT, "overlap-second");
+    try {
+      await env.COLLECT.create({ id: "overlap-first", params: {} });
+      await runs.firstHeld.opened();
+      await env.COLLECT.create({ id: "overlap-second", params: {} });
+      await runs.secondHeld.opened();
+
+      const held = await db().selectFrom("npmDays").selectAll().execute();
+      expect(held).toHaveLength(1);
+      expect(held[0]).toMatchObject({ lastDay: yesterday(), weekStart: week(yesterday()).start, weekEnd: yesterday() });
+
+      const windows = [{ ...week(yesterday()), counts: COUNTS }];
+      runs.releaseFirst.open();
+      await first.waitForStatus("complete");
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => windows));
+
+      runs.releaseSecond.open();
+      await second.waitForStatus("complete");
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => windows));
+    } finally {
+      // A held instance never finishes, and disposing it waits for it to: let both through whatever failed.
+      runs.releaseFirst.open();
+      runs.releaseSecond.open();
+    }
+  });
+
+  test("a run told of a later day undates the week another confirmed, which then publishes the window before it, and today's once confirmed", async () => {
+    // An earlier capture, dated by npm, which each publish falls back to while today's week is not known.
+    const earlier = addDays(today(), -9);
+    for (const name of PACKAGES) await writeVersionDownloads(db(), name, { "0.1.0": 1 }, earlier);
+    const earlierWeek = week(addDays(earlier, -1));
+    await writeNpmDays(db(), { package: PACKAGES[0] ?? "", lastDay: earlierWeek.end, lastWeek: earlierWeek }, earlier);
+    await writeNpmWeek(db(), earlierWeek, earlier);
+
+    const runs = heldRuns(twoDaysBack, yesterday);
+    await using first = await introspectWorkflowInstance(env.COLLECT, "later-first");
+    await using second = await introspectWorkflowInstance(env.COLLECT, "later-second");
+    try {
+      await env.COLLECT.create({ id: "later-first", params: {} });
+      await runs.firstHeld.opened();
+      expect(await db().selectFrom("npmDays").select("weekEnd").where("capturedOn", "=", today()).execute()).toEqual([
+        { weekEnd: twoDaysBack() },
+      ]);
+      await env.COLLECT.create({ id: "later-second", params: {} });
+      await runs.secondHeld.opened();
+      expect(await db().selectFrom("npmDays").selectAll().where("capturedOn", "=", today()).execute()).toEqual([
+        { capturedOn: today(), lastDay: yesterday(), weekStart: null, weekEnd: null },
+      ]);
+
+      const before = { ...earlierWeek, counts: { "0.1.0": 1 } };
+      runs.releaseFirst.open();
+      await first.waitForStatus("complete");
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => [before]));
+
+      runs.releaseSecond.open();
+      await second.waitForStatus("complete");
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => [before, { ...week(yesterday()), counts: COUNTS }]));
+    } finally {
+      runs.releaseFirst.open();
+      runs.releaseSecond.open();
+    }
+  });
+
+  test("a run whose completion lands after a later run confirmed a later day leaves that week, and both publish today's window", async () => {
+    const LAST_WEEK = "https://api.npmjs.org/downloads/point/last-week/";
+    const firstHeld = gate();
+    const releaseFirst = gate();
+    let rolled = false;
+    let lastWeeks = 0;
+    const base = upstreamsWith(npmPoints(() => (rolled ? yesterday() : twoDaysBack())));
+    stubUpstreams({
+      calls: base.calls,
+      fetch: async (url, init) => {
+        // The first run's second last-week request is its completion step's: npm closes a day just before it.
+        if (url.startsWith(LAST_WEEK) && ++lastWeeks === 2) {
+          rolled = true;
+          firstHeld.open();
+          await releaseFirst.opened();
+        }
+        return base.fetch(url, init);
+      },
+    });
+    await using first = await introspectWorkflowInstance(env.COLLECT, "stale-first");
+    await using second = await introspectWorkflowInstance(env.COLLECT, "stale-second");
+    try {
+      await env.COLLECT.create({ id: "stale-first", params: {} });
+      await firstHeld.opened();
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([
+        { capturedOn: today(), lastDay: twoDaysBack(), weekStart: null, weekEnd: null },
+      ]);
+
+      await env.COLLECT.create({ id: "stale-second", params: {} });
+      await second.waitForStatus("complete");
+      const confirmed = {
+        capturedOn: today(),
+        lastDay: yesterday(),
+        weekStart: week(yesterday()).start,
+        weekEnd: yesterday(),
+      };
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([confirmed]);
+      const windows = [{ ...week(yesterday()), counts: COUNTS }];
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => windows));
+
+      releaseFirst.open();
+      await first.waitForStatus("complete");
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([confirmed]);
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => windows));
+    } finally {
+      releaseFirst.open();
+    }
+  });
+
+  test("a run that keeps a confirmed week undates it before writing counts npm closed a day under, so a publish meanwhile does not date them", async () => {
+    const firstHeld = gate();
+    const releaseFirst = gate();
+    const secondHeld = gate();
+    const releaseSecond = gate();
+    let rolled = false;
+    let scorecards = 0;
+    let secondVersions = 0;
+    const base = upstreamsWith({
+      ...npmPoints(() => (rolled ? yesterday() : twoDaysBack())),
+      [`${VERSIONS}*`]: () => (rolled ? { json: { downloads: { "0.1.0": 5, "0.2.0": 50 } } } : { status: 599 }),
+    });
+    stubUpstreams({
+      calls: base.calls,
+      fetch: async (url, init) => {
+        if (url.startsWith(SCORECARD) && ++scorecards === 1) {
+          firstHeld.open();
+          await releaseFirst.opened();
+        }
+        if (url.startsWith(VERSIONS) && scorecards > 0) {
+          // npm closes a day as the second run fetches its first package's counts, and it is held at its second.
+          if (++secondVersions === 1) rolled = true;
+          else if (secondVersions === 2) {
+            secondHeld.open();
+            await releaseSecond.opened();
+          }
+        }
+        return base.fetch(url, init);
+      },
+    });
+    await using first = await introspectWorkflowInstance(env.COLLECT, "kept-first");
+    await using second = await introspectWorkflowInstance(env.COLLECT, "kept-second");
+    try {
+      await env.COLLECT.create({ id: "kept-first", params: {} });
+      await firstHeld.opened();
+      const confirmed = {
+        capturedOn: today(),
+        lastDay: twoDaysBack(),
+        weekStart: week(twoDaysBack()).start,
+        weekEnd: twoDaysBack(),
+      };
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([confirmed]);
+
+      await env.COLLECT.create({ id: "kept-second", params: {} });
+      await secondHeld.opened();
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([
+        { ...confirmed, weekStart: null, weekEnd: null },
+      ]);
+
+      releaseFirst.open();
+      await first.waitForStatus("complete");
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => []));
+
+      releaseSecond.open();
+      await second.waitForStatus("complete");
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => []));
+    } finally {
+      releaseFirst.open();
+      releaseSecond.open();
+    }
+  });
+
+  test("a completion that dates the week after npm closed a day, while another run wrote counts for the next, undates it again", async () => {
+    const LAST_WEEK = "https://api.npmjs.org/downloads/point/last-week/";
+    const firstHeld = gate();
+    const releaseFirst = gate();
+    const secondHeld = gate();
+    const releaseSecond = gate();
+    let rolled = false;
+    let lastWeeks = 0;
+    let secondVersions = 0;
+    let firstIsHeld = false;
+    const base = upstreamsWith({
+      ...npmPoints(() => (rolled ? yesterday() : twoDaysBack())),
+      [`${VERSIONS}*`]: () => (rolled ? { json: { downloads: { "0.1.0": 5, "0.2.0": 50 } } } : { status: 599 }),
+    });
+    stubUpstreams({
+      calls: base.calls,
+      fetch: async (url, init) => {
+        if (url.startsWith(VERSIONS) && firstIsHeld) {
+          // npm closes a day as the second run fetches its first package's counts, and it is held at its second.
+          if (++secondVersions === 1) rolled = true;
+          else if (secondVersions === 2) {
+            secondHeld.open();
+            await releaseSecond.opened();
+          }
+        }
+        const response = await base.fetch(url, init);
+        // The first run's second last-week request is its completion step's: it is answered, then held before writing.
+        if (url.startsWith(LAST_WEEK) && ++lastWeeks === 2) {
+          firstIsHeld = true;
+          firstHeld.open();
+          await releaseFirst.opened();
+        }
+        return response;
+      },
+    });
+    await using first = await introspectWorkflowInstance(env.COLLECT, "late-first");
+    await using second = await introspectWorkflowInstance(env.COLLECT, "late-second");
+    try {
+      await env.COLLECT.create({ id: "late-first", params: {} });
+      await firstHeld.opened();
+      await env.COLLECT.create({ id: "late-second", params: {} });
+      await secondHeld.opened();
+      const undated = { capturedOn: today(), lastDay: twoDaysBack(), weekStart: null, weekEnd: null };
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([undated]);
+
+      releaseFirst.open();
+      await first.waitForStatus("complete");
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([undated]);
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => []));
+
+      releaseSecond.open();
+      await second.waitForStatus("complete");
+      expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([undated]);
+      expect(await publishedWeeks()).toEqual(PACKAGES.map(() => []));
+    } finally {
+      releaseFirst.open();
+      releaseSecond.open();
+    }
+  });
+
+  test("a later run that sees npm close a day mid-run undates the week an earlier run confirmed, since its counts are mixed", async () => {
+    stubUpstreams(upstreamsWith(npmPoints(twoDaysBack)));
+    let capturedOn: string;
+    {
+      await using instance = await introspectWorkflowInstance(env.COLLECT, "confirmed");
+      await env.COLLECT.create({ id: "confirmed", params: {} });
+      await instance.waitForStatus("complete");
+      ({ capturedOn } = (await instance.getOutput()) as { capturedOn: string });
+    }
+    expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([
+      { capturedOn, lastDay: twoDaysBack(), weekStart: week(twoDaysBack()).start, weekEnd: twoDaysBack() },
+    ]);
+
+    vi.restoreAllMocks();
+    let rolled = false;
+    stubUpstreams(
+      upstreamsWith({
+        ...npmPoints(() => (rolled ? yesterday() : twoDaysBack())),
+        [`${VERSIONS}*`]: () => {
+          rolled = true;
+          return { status: 599 };
+        },
+      }),
+    );
+    {
+      await using instance = await introspectWorkflowInstance(env.COLLECT, "rolled-after-confirmed");
+      await env.COLLECT.create({ id: "rolled-after-confirmed", params: {} });
+      await instance.waitForStatus("complete");
+    }
+    expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([
+      { capturedOn, lastDay: twoDaysBack(), weekStart: null, weekEnd: null },
+    ]);
+    const latest = Latest.parse(await published(currentKey("latest")));
+    for (const row of latest.packages) expect(row.versionWeeks).toEqual([]);
   });
 });

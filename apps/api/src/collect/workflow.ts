@@ -8,14 +8,17 @@ import { secretsStore } from "@pithy-sh/secrets/src/secretsStore";
 import { z } from "zod";
 import { type StatsDatabase, statsDatabase } from "../data/tables";
 import { GITHUB_TOKEN, statsSecretRegistry } from "../secret/registry";
-import { Day, utcDay } from "./day";
+import { Day, type DayRange, utcDay } from "./day";
 import { markHistoryCollected, readHistoryState } from "./history";
 import { countTarball } from "./kit/source";
 import { publish } from "./publish/publish";
 import { loggedStep } from "./step";
 import {
+  clearNpmWeek,
+  readNpmWeek,
   recordCollected,
   recordPackages,
+  undateNpmWeek,
   writeCdn,
   writeCommits,
   writeDailyDownloads,
@@ -270,7 +273,14 @@ async function planWindows(
 /**
  * Date today's per-version counts, once every package's have been written: npm is asked again for its `last-week`
  * window, and only if it is still the one the download-windows step was told is it recorded as theirs. If npm closed a
- * day in between, some counts may cover the old week and some the new, so none is dated, and none is published.
+ * day in between, some counts may cover the old week and some the new, so the day's week is cleared, one an earlier
+ * run that day confirmed included, unless a run told of a later day has moved the day on, whose own completion dates
+ * the counts it rewrote.
+ *
+ * Once written, npm is asked a third time. Another run may have fetched and written counts after npm closed a day but
+ * before this write, and the week just written would date them. npm only moves forward, so any counts fetched after it
+ * moved were fetched before this last request, which then sees the move and clears the week, unless another run has
+ * since recorded a different one.
  */
 async function dateVersionCounts(
   db: StatsDatabase,
@@ -280,14 +290,52 @@ async function dateVersionCounts(
   today: Day,
 ): Promise<void> {
   const week = await fetchNpmWeek(fetcher, npm.package);
-  if (week.start === npm.lastWeek.start && week.end === npm.lastWeek.end) {
+  if (sameWeek(week, npm.lastWeek)) {
     await writeNpmWeek(db, week, today);
+    const after = await fetchNpmWeek(fetcher, npm.package);
+    if (sameWeek(after, week)) return;
+    await undateNpmWeek(db, week, today);
+    log.warn("npm's last-week window moved as today's per-version counts were dated: the week is cleared", {
+      capturedOn: today,
+      written: `${week.start}..${week.end}`,
+      after: `${after.start}..${after.end}`,
+    });
     return;
   }
+  await clearNpmWeek(db, npm.lastDay, today);
   log.warn("npm's last-week window moved while per-version counts were fetched: they are kept undated", {
     capturedOn: today,
     probed: `${npm.lastWeek.start}..${npm.lastWeek.end}`,
     after: `${week.start}..${week.end}`,
+  });
+}
+
+function sameWeek(a: DayRange, b: DayRange): boolean {
+  return a.start === b.start && a.end === b.end;
+}
+
+/**
+ * Before one package's per-version counts are written under `today`: if a week is already recorded for the day,
+ * another run confirmed it, and a publish dates whatever is written now by it. npm is asked for its `last-week` again,
+ * which the counts just fetched cover, and the recorded week is cleared when it is not that one, so a publish meanwhile
+ * falls back to an earlier dated capture rather than dating these counts by the wrong week.
+ */
+async function undateIfMoved(
+  db: StatsDatabase,
+  fetcher: Fetcher,
+  log: Logger,
+  npm: NpmDays,
+  today: Day,
+): Promise<void> {
+  const recorded = await readNpmWeek(db, today);
+  if (recorded === null) return;
+  const week = await fetchNpmWeek(fetcher, npm.package);
+  if (sameWeek(week, recorded)) return;
+  await undateNpmWeek(db, recorded, today);
+  log.warn("npm's last-week window is not the week recorded for today's per-version counts: that week is cleared", {
+    capturedOn: today,
+    recorded: `${recorded.start}..${recorded.end}`,
+    now: `${week.start}..${week.end}`,
   });
 }
 
@@ -321,6 +369,7 @@ function sources(
     versionDownloads: {
       ...perPackage(async (name) => {
         const counts = await fetchVersionDownloads(fetcher, name);
+        await undateIfMoved(db, fetcher, log, plan().npm, today);
         await writeVersionDownloads(db, name, counts, today);
         return Object.keys(counts).length;
       }),

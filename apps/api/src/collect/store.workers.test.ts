@@ -4,8 +4,11 @@ import { statsDatabase } from "../data/tables";
 import { freshDatabase } from "../data/testing";
 import { addDays } from "./day";
 import {
+  clearNpmWeek,
+  readNpmWeek,
   recordCollected,
   recordPackages,
+  undateNpmWeek,
   writeCdn,
   writeCommits,
   writeDailyDownloads,
@@ -378,15 +381,88 @@ describe("writeNpmDays", () => {
     lastWeek: { start: addDays(lastDay, -6), end: lastDay },
   });
 
-  test("keeps one row per capture day, with no week until one is confirmed, and a second run that day replaces it", async () => {
+  const rowsHeld = () => db().selectFrom("npmDays").selectAll().orderBy("capturedOn").execute();
+
+  test("keeps one row per capture day, with no week until one is confirmed", async () => {
     await writeNpmDays(db(), npm("2026-11-07"), "2026-11-09");
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    expect(await rowsHeld()).toEqual([
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: null, weekEnd: null },
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: null, weekEnd: null },
+    ]);
+  });
+
+  test("a second run that day with the same answer keeps the week already confirmed", async () => {
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    expect(await rowsHeld()).toEqual([
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
+    ]);
+  });
+
+  test("a second run that day told of a later day replaces it and clears the week, which no longer covers its counts", async () => {
     await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
     await writeNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
     await writeNpmDays(db(), npm("2026-11-09"), "2026-11-10");
-    expect(await db().selectFrom("npmDays").selectAll().orderBy("capturedOn").execute()).toEqual([
-      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: null, weekEnd: null },
+    expect(await rowsHeld()).toEqual([
       { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: null, weekEnd: null },
     ]);
+  });
+
+  test("writeNpmWeek leaves a day alone whose recorded last day the week does not end on", async () => {
+    await writeNpmDays(db(), npm("2026-11-09"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
+    expect(await rowsHeld()).toEqual([
+      { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: null, weekEnd: null },
+    ]);
+  });
+
+  test("clearNpmWeek undates only its own capture day", async () => {
+    await writeNpmDays(db(), npm("2026-11-07"), "2026-11-09");
+    await writeNpmWeek(db(), { start: "2026-11-01", end: "2026-11-07" }, "2026-11-09");
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
+    await clearNpmWeek(db(), "2026-11-08", "2026-11-10");
+    expect(await rowsHeld()).toEqual([
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: null, weekEnd: null },
+    ]);
+  });
+
+  test("an older answer that day leaves the row on the later day it already names, with its week", async () => {
+    await writeNpmDays(db(), npm("2026-11-09"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-03", end: "2026-11-09" }, "2026-11-10");
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    expect(await rowsHeld()).toEqual([
+      { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: "2026-11-03", weekEnd: "2026-11-09" },
+    ]);
+  });
+
+  test("clearNpmWeek leaves a week that ends on a later day than the one the clearing run was told of", async () => {
+    await writeNpmDays(db(), npm("2026-11-08"), "2026-11-10");
+    await writeNpmDays(db(), npm("2026-11-09"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-03", end: "2026-11-09" }, "2026-11-10");
+    await clearNpmWeek(db(), "2026-11-08", "2026-11-10");
+    expect(await rowsHeld()).toEqual([
+      { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: "2026-11-03", weekEnd: "2026-11-09" },
+    ]);
+  });
+
+  test("undateNpmWeek clears the day's week only while it is the week given", async () => {
+    await writeNpmDays(db(), npm("2026-11-09"), "2026-11-10");
+    await writeNpmWeek(db(), { start: "2026-11-03", end: "2026-11-09" }, "2026-11-10");
+    await undateNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
+    expect(await readNpmWeek(db(), "2026-11-10")).toEqual({ start: "2026-11-03", end: "2026-11-09" });
+    await undateNpmWeek(db(), { start: "2026-11-03", end: "2026-11-09" }, "2026-11-10");
+    expect(await readNpmWeek(db(), "2026-11-10")).toBeNull();
+    expect(await rowsHeld()).toEqual([
+      { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: null, weekEnd: null },
+    ]);
+  });
+
+  test("readNpmWeek answers null for a day with no row", async () => {
+    expect(await readNpmWeek(db(), "2026-11-10")).toBeNull();
   });
 
   test("writeNpmWeek dates only its own capture day", async () => {

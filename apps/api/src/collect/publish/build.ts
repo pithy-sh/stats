@@ -22,6 +22,7 @@ import type {
   VersionDownload,
   VersionPublish,
 } from "../../data/tables";
+import { nextUpdateAfter, type Schedule } from "../../schedule";
 import { addDays, type Day, type DayRange, utcDay } from "../day";
 import {
   dailySeries,
@@ -323,8 +324,11 @@ function asOfDay(rows: PublishRows, now: Date): Day {
   return counted !== null && counted < newest ? counted : newest;
 }
 
-/** `latest.json`: everything the `/stats/` page draws, from the rows D1 holds, as of `now`. */
-export function buildLatest(rows: PublishRows, subject: PublishSubject, now: Date): Latest {
+/**
+ * `latest.json`: everything the `/stats/` page draws, from the rows D1 holds, as of `now`. `schedule` dates
+ * `nextUpdate`.
+ */
+export function buildLatest(rows: PublishRows, subject: PublishSubject, now: Date, schedule: Schedule): Latest {
   const asOf = asOfDay(rows, now);
   const held = rows.dailyDownloads.filter((row) => row.day <= asOf);
   const span: DayRange | null =
@@ -334,6 +338,7 @@ export function buildLatest(rows: PublishRows, subject: PublishSubject, now: Dat
   return {
     version: CONTRACT_VERSION,
     generatedAt: iso(now),
+    nextUpdate: iso(nextUpdateAfter(now, schedule)),
     asOf,
     sources: sourceTimes(rows.collections),
     downloads:
@@ -372,6 +377,7 @@ export function buildSummary(rows: PublishRows, latest: Latest): Summary {
   return {
     version: CONTRACT_VERSION,
     generatedAt: latest.generatedAt,
+    nextUpdate: latest.nextUpdate,
     asOf: latest.asOf,
     downloads: {
       since: firstCreated === null ? null : utcDay(firstCreated),

@@ -709,7 +709,7 @@
         ],
         "operationId": "getV1Summary",
         "summary": "Read the kit's headline numbers.",
-        "description": "The home page strip. Cached until the next file is ready, at 02:05 UTC, or for five minutes once that file is late, then revalidated in the background for an hour.",
+        "description": "The home page strip. Cached until the next file is ready, 15 minutes after the 02:00 UTC run starts, by default, or for five minutes once that file is late, then revalidated in the background for an hour. `nextUpdate` is the ready time of the run after this file, so a copy may revalidate before it.",
         "parameters": [
           {
             "name": "if-none-match",
@@ -739,6 +739,12 @@
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
                       "description": "When the publish step ran."
+                    },
+                    "nextUpdate": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                      "description": "The time the next run after this file is ready: the first collector run to start after `generatedAt`, ready 15 minutes after the 02:00 UTC run starts, by default. A cache may revalidate sooner: at the current run's ready time, or after five minutes while a run is late."
                     },
                     "asOf": {
                       "type": "string",
@@ -1110,6 +1116,7 @@
                   "required": [
                     "version",
                     "generatedAt",
+                    "nextUpdate",
                     "asOf",
                     "downloads",
                     "releases",
@@ -1146,7 +1153,7 @@
         ],
         "operationId": "getV1SnapshotsByDateSummary",
         "summary": "Read one day's headline numbers.",
-        "description": "The file as published on that UTC day. A later run that day may rewrite it, so until the day is over it expires at the next 02:05 UTC or at midnight UTC, whichever is sooner; from then on it never changes and is cached as immutable.",
+        "description": "The file as published on that UTC day. A later run that day may rewrite it, so until the day is over it expires when the next file is ready, 15 minutes after the 02:00 UTC run starts, by default, or at midnight UTC, whichever is sooner; from then on it never changes and is cached as immutable.",
         "parameters": [
           {
             "name": "date",
@@ -1171,7 +1178,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The home page strip's headline numbers, served at `/v1/summary`. Nothing in it needs the history.",
+            "description": "One day's `summary.json`, served at `/v1/snapshots/{date}/summary`: `Summary` as published that day.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1187,6 +1194,12 @@
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
                       "description": "When the publish step ran."
+                    },
+                    "nextUpdate": {
+                      "description": "The time the next run after this file is ready: the first collector run to start after `generatedAt`, ready 15 minutes after the 02:00 UTC run starts, by default. A cache may revalidate sooner: at the current run's ready time, or after five minutes while a run is late. Absent from a snapshot published before the field was added to version 1.",
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
                     },
                     "asOf": {
                       "type": "string",
@@ -1567,7 +1580,7 @@
                     "github",
                     "kit"
                   ],
-                  "description": "The home page strip's headline numbers, served at `/v1/summary`. Nothing in it needs the history."
+                  "description": "One day's `summary.json`, served at `/v1/snapshots/{date}/summary`: `Summary` as published that day."
                 }
               }
             }
@@ -1594,7 +1607,7 @@
         ],
         "operationId": "getV1Latest",
         "summary": "Read everything the stats page draws.",
-        "description": "Every dataset `/stats/` draws. Cached until the next file is ready, at 02:05 UTC, or for five minutes once that file is late, then revalidated in the background for an hour.",
+        "description": "Every dataset `/stats/` draws. Cached until the next file is ready, 15 minutes after the 02:00 UTC run starts, by default, or for five minutes once that file is late, then revalidated in the background for an hour. `nextUpdate` is the ready time of the run after this file, so a copy may revalidate before it.",
         "parameters": [
           {
             "name": "if-none-match",
@@ -1624,6 +1637,12 @@
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
                       "description": "When the publish step ran."
+                    },
+                    "nextUpdate": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                      "description": "The time the next run after this file is ready: the first collector run to start after `generatedAt`, ready 15 minutes after the 02:00 UTC run starts, by default. A cache may revalidate sooner: at the current run's ready time, or after five minutes while a run is late."
                     },
                     "asOf": {
                       "type": "string",
@@ -2824,6 +2843,7 @@
                   "required": [
                     "version",
                     "generatedAt",
+                    "nextUpdate",
                     "asOf",
                     "sources",
                     "downloads",
@@ -2861,7 +2881,7 @@
         ],
         "operationId": "getV1SnapshotsByDateLatest",
         "summary": "Read one day's full stats.",
-        "description": "The file as published on that UTC day. A later run that day may rewrite it, so until the day is over it expires at the next 02:05 UTC or at midnight UTC, whichever is sooner; from then on it never changes and is cached as immutable.",
+        "description": "The file as published on that UTC day. A later run that day may rewrite it, so until the day is over it expires when the next file is ready, 15 minutes after the 02:00 UTC run starts, by default, or at midnight UTC, whichever is sooner; from then on it never changes and is cached as immutable.",
         "parameters": [
           {
             "name": "date",
@@ -2886,7 +2906,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Everything the `/stats/` page draws, served at `/v1/latest`.",
+            "description": "One day's `latest.json`, served at `/v1/snapshots/{date}/latest`: `Latest` as published that day.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2902,6 +2922,12 @@
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
                       "description": "When the publish step ran."
+                    },
+                    "nextUpdate": {
+                      "description": "The time the next run after this file is ready: the first collector run to start after `generatedAt`, ready 15 minutes after the 02:00 UTC run starts, by default. A cache may revalidate sooner: at the current run's ready time, or after five minutes while a run is late. Absent from a snapshot published before the field was added to version 1.",
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
                     },
                     "asOf": {
                       "type": "string",
@@ -4112,7 +4138,7 @@
                     "scorecard",
                     "kit"
                   ],
-                  "description": "Everything the `/stats/` page draws, served at `/v1/latest`."
+                  "description": "One day's `latest.json`, served at `/v1/snapshots/{date}/latest`: `Latest` as published that day."
                 }
               }
             }

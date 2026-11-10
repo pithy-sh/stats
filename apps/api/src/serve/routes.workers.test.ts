@@ -1,24 +1,46 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import type { PithyHonoEnv } from "@pithy-sh/core/src/capability/capability";
+import { routeSpecOf } from "@pithy-sh/core/src/http/routeSpec";
+import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { z } from "zod";
+import { buildLatest, buildSummary, type PublishRows } from "../collect/publish/build";
 import { currentKey, snapshotKey } from "../contract/objects";
 import worker from "../index";
+import { COLLECT_CRON, dailyRunStart, type Schedule } from "../schedule";
 import { secondsUntilNextFile } from "./cache";
+import { statsRoutes } from "./routes";
 
 const SUMMARY = JSON.stringify({ version: 1, file: "summary" });
 const LATEST = JSON.stringify({ version: 1, file: "latest" });
 const DAY = "2026-11-08";
+/** The test runtime's schedule: the cron's 02:00 UTC start, and its `READY_AFTER_MINUTES` of 20. */
+const SCHEDULE: Schedule = { runStartMs: dailyRunStart(COLLECT_CRON), readyAfterMs: 20 * 60_000 };
 
-async function request(path: string, init: RequestInit = {}): Promise<Response> {
+async function request(path: string, init: RequestInit = {}, vars: Record<string, unknown> = {}): Promise<Response> {
   const ctx = createExecutionContext();
   const fetch = worker.fetch;
   if (fetch === undefined) throw new Error("The Worker exports no fetch handler.");
   const response = await fetch(
     new Request(`https://stats.pithy.sh${path}`, init) as Request<unknown, IncomingRequestCfProperties>,
-    env as unknown as Record<string, unknown>,
+    { ...env, ...vars } as unknown as Record<string, unknown>,
     ctx,
   );
   await waitOnExecutionContext(ctx);
   return response;
+}
+
+/** The 200 body schema `path` declares for `GET`, as the OpenAPI document is written from it. */
+function declaredSchema(path: string): z.ZodType {
+  const app = new Hono<PithyHonoEnv>();
+  statsRoutes(app);
+  const spec = app.routes
+    .filter((route) => route.method === "GET" && route.path === path)
+    .map((route) => routeSpecOf(route.handler))
+    .find((candidate) => candidate !== undefined);
+  const schema = spec?.responses[200];
+  if (schema === undefined || !("safeParse" in schema)) throw new Error(`${path} declares no 200 schema.`);
+  return schema as z.ZodType;
 }
 
 function maxAge(response: Response): number {
@@ -76,10 +98,10 @@ describe("the current files", () => {
       expect(response.headers.get("etag")).toBe((await env.PUBLISHED.head(key))?.httpEtag);
     });
 
-    test(`${path} is public and expires at the next 02:05 UTC`, async () => {
-      const before = secondsUntilNextFile(new Date());
+    test(`${path} is public and expires at the next ready time`, async () => {
+      const before = secondsUntilNextFile(new Date(), SCHEDULE);
       const response = await request(path);
-      const after = secondsUntilNextFile(new Date());
+      const after = secondsUntilNextFile(new Date(), SCHEDULE);
       expect(response.headers.get("cache-control")).toMatch(/^public, max-age=\d+, stale-while-revalidate=3600$/);
       expect([before, after]).toContain(maxAge(response));
     });
@@ -90,32 +112,61 @@ describe("the current files", () => {
     try {
       // Days before the real upload, so the files read as today's, never late.
       vi.setSystemTime(new Date(dayFromNow(-3, "23:59:59")));
-      expect(maxAge(await request("/v1/latest"))).toBe(2 * 3600 + 5 * 60 + 1);
-      vi.setSystemTime(new Date(dayFromNow(-2, "02:04:00")));
+      expect(maxAge(await request("/v1/latest"))).toBe(2 * 3600 + 20 * 60 + 1);
+      vi.setSystemTime(new Date(dayFromNow(-2, "02:19:00")));
       expect(maxAge(await request("/v1/latest"))).toBe(60);
-      vi.setSystemTime(new Date(dayFromNow(-2, "02:05:00")));
+      vi.setSystemTime(new Date(dayFromNow(-2, "02:20:00")));
       expect(maxAge(await request("/v1/summary"))).toBe(86_400);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  test("a file today's run has not replaced by 02:05 is kept five minutes, not until tomorrow", async () => {
+  test("a file today's run has not replaced by its ready time is kept five minutes, not until tomorrow", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       // Two days after the real upload: the files are older than today's 02:00 UTC.
-      vi.setSystemTime(new Date(dayFromNow(2, "02:06:00")));
+      vi.setSystemTime(new Date(dayFromNow(2, "02:21:00")));
       const late = await request("/v1/latest");
       expect(late.headers.get("cache-control")).toBe("public, max-age=300, stale-while-revalidate=3600");
       // An edge copy is judged by when its file was uploaded too.
       expect(maxAge(await request("/v1/latest?again"))).toBe(300);
-      // Before 02:05 the next file is not due yet, so a copy still counts to it.
-      vi.setSystemTime(new Date(dayFromNow(2, "01:00:00")));
-      expect(maxAge(await request("/v1/latest"))).toBe(3900);
+      // Before today's ready time, yesterday's run is the one overdue, so a copy is still kept five minutes.
+      vi.setSystemTime(new Date(dayFromNow(2, "02:10:00")));
+      expect(maxAge(await request("/v1/latest"))).toBe(300);
     } finally {
       vi.useRealTimers();
     }
   });
+
+  test("READY_AFTER_MINUTES sets the ready time, for the current files and today's snapshot", async () => {
+    const today = "2027-03-10";
+    await env.PUBLISHED.put(snapshotKey(today, "latest"), LATEST);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // Days before the real upload, so the current file reads as today's, never late.
+      vi.setSystemTime(new Date(dayFromNow(-3, "01:00:00")));
+      expect(maxAge(await request("/v1/latest", {}, { READY_AFTER_MINUTES: "45" }))).toBe(105 * 60);
+      vi.setSystemTime(new Date(`${today}T01:00:00Z`));
+      expect(maxAge(await request(`/v1/snapshots/${today}/latest`, {}, { READY_AFTER_MINUTES: "45" }))).toBe(105 * 60);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  for (const value of [undefined, "abc", "1.5", "-5", "1440"]) {
+    test(`an unset or invalid READY_AFTER_MINUTES, ${String(value)}, falls back to 15 minutes and never fails`, async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(dayFromNow(-3, "01:00:00")));
+        const response = await request("/v1/summary", {}, { READY_AFTER_MINUTES: value });
+        expect(response.status).toBe(200);
+        expect(maxAge(response)).toBe(75 * 60);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
 
   test("a new file has a new ETag once the edge copy has expired", async () => {
     const first = (await request("/v1/latest")).headers.get("etag");
@@ -208,7 +259,7 @@ describe("snapshots", () => {
       expect(during.headers.get("cache-control")).toBe(`public, max-age=${12 * 3600}`);
       vi.setSystemTime(new Date(`${today}T01:00:00Z`));
       const beforeRun = await request(`/v1/snapshots/${today}/latest?early`);
-      expect(beforeRun.headers.get("cache-control")).toBe(`public, max-age=${3600 + 5 * 60}`);
+      expect(beforeRun.headers.get("cache-control")).toBe(`public, max-age=${3600 + 20 * 60}`);
       vi.setSystemTime(new Date("2027-03-11T00:00:00Z"));
       const after = await request(`/v1/snapshots/${today}/latest`);
       expect(after.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
@@ -271,6 +322,39 @@ describe("snapshots", () => {
     const response = await request("/v1/snapshots/2026-01-01/latest");
     expect(response.status).toBe(404);
     expect(response.headers.get("cache-control")).toBe("public, max-age=300");
+  });
+
+  test("a snapshot published before `nextUpdate` existed is served, and matches the schema its route declares", async () => {
+    const noRows: PublishRows = {
+      packages: [],
+      dailyDownloads: [],
+      versionDownloads: [],
+      npmDays: [],
+      versionPublishes: [],
+      registry: [],
+      repo: null,
+      issues: [],
+      pullRequests: [],
+      commits: [],
+      cdn: [],
+      dependents: [],
+      scorecard: null,
+      collections: [],
+      kitCounts: [],
+    };
+    const latest = buildLatest(noRows, { repo: "pithy-sh/pithy" }, new Date(`${DAY}T02:10:00Z`), SCHEDULE);
+    const files = { latest, summary: buildSummary(noRows, latest) };
+    for (const [file, built] of Object.entries(files) as [keyof typeof files, (typeof files)[keyof typeof files]][]) {
+      const { nextUpdate: _dropped, ...older } = built;
+      await env.PUBLISHED.put(snapshotKey(DAY, file), JSON.stringify(older));
+      const response = await request(`/v1/snapshots/${DAY}/${file}`);
+      expect(response.status).toBe(200);
+      const body: unknown = await response.json();
+      expect(body).not.toHaveProperty("nextUpdate");
+      expect(declaredSchema(`/v1/snapshots/:date/${file}`).safeParse(body).error, file).toBeUndefined();
+      // The current files are rewritten every run, so they always carry it.
+      expect(declaredSchema(`/v1/${file}`).safeParse(body).success, file).toBe(false);
+    }
   });
 
   test("a date that is not a day is refused before R2 is read", async () => {

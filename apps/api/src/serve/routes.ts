@@ -6,7 +6,8 @@ import type { Context, Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { currentKey, PUBLISHED_BINDING, type PublishedFile, snapshotKey } from "../contract/objects";
-import { Latest, Summary } from "../contract/stats";
+import { Latest, SnapshotLatest, SnapshotSummary, Summary } from "../contract/stats";
+import { READY_RULE, readSchedule, type Schedule } from "../schedule";
 import { currentCacheControl, NOT_FOUND_CACHE_CONTROL, SNAPSHOT_CACHE_CONTROL, snapshotCacheControl } from "./cache";
 
 /**
@@ -68,6 +69,11 @@ function bucketOf(c: Context<PithyHonoEnv>): R2Bucket {
     throw new InternalError({ detail: `No R2 bucket is bound as ${PUBLISHED_BINDING}.` });
   }
   return bucket;
+}
+
+/** The collector's schedule as this Worker's env sets it: an invalid `READY_AFTER_MINUTES` falls back to the default. */
+function scheduleOf(c: Context<PithyHonoEnv>): Schedule {
+  return readSchedule(c.env, c.var.log);
 }
 
 /** One file as served: its bytes, its ETag and when R2 stored it. */
@@ -157,18 +163,21 @@ async function serveObject(
   return c.body(file.body, 200, { ...headers, "content-type": "application/json; charset=utf-8" });
 }
 
-const CURRENT: Record<PublishedFile, { summary: string; description: string; schema: z.ZodType }> = {
+const CURRENT: Record<
+  PublishedFile,
+  { summary: string; description: string; schema: z.ZodType; snapshotSchema: z.ZodType }
+> = {
   summary: {
     summary: "Read the kit's headline numbers.",
-    description:
-      "The home page strip. Cached until the next file is ready, at 02:05 UTC, or for five minutes once that file is late, then revalidated in the background for an hour.",
+    description: `The home page strip. Cached until the next file is ready, ${READY_RULE}, or for five minutes once that file is late, then revalidated in the background for an hour. \`nextUpdate\` is the ready time of the run after this file, so a copy may revalidate before it.`,
     schema: Summary,
+    snapshotSchema: SnapshotSummary,
   },
   latest: {
     summary: "Read everything the stats page draws.",
-    description:
-      "Every dataset `/stats/` draws. Cached until the next file is ready, at 02:05 UTC, or for five minutes once that file is late, then revalidated in the background for an hour.",
+    description: `Every dataset \`/stats/\` draws. Cached until the next file is ready, ${READY_RULE}, or for five minutes once that file is late, then revalidated in the background for an hour. \`nextUpdate\` is the ready time of the run after this file, so a copy may revalidate before it.`,
     schema: Latest,
+    snapshotSchema: SnapshotLatest,
   },
 };
 
@@ -200,7 +209,7 @@ export function statsRoutes(app: Hono<PithyHonoEnv>, now: () => Date = () => new
         serveObject(
           c,
           currentKey(file),
-          (uploaded) => currentCacheControl(now(), uploaded),
+          (uploaded) => currentCacheControl(now(), scheduleOf(c), uploaded),
           c.req.valid("header")["if-none-match"],
         ),
     );
@@ -208,10 +217,9 @@ export function statsRoutes(app: Hono<PithyHonoEnv>, now: () => Date = () => new
       `/v1/snapshots/:date/${file}`,
       describeRoute({
         summary: `Read one day's ${file === "summary" ? "headline numbers" : "full stats"}.`,
-        description:
-          "The file as published on that UTC day. A later run that day may rewrite it, so until the day is over it expires at the next 02:05 UTC or at midnight UTC, whichever is sooner; from then on it never changes and is cached as immutable.",
+        description: `The file as published on that UTC day. A later run that day may rewrite it, so until the day is over it expires when the next file is ready, ${READY_RULE}, or at midnight UTC, whichever is sooner; from then on it never changes and is cached as immutable.`,
         verification: "public",
-        responses: { 200: route.schema, 304: NOT_MODIFIED },
+        responses: { 200: route.snapshotSchema, 304: NOT_MODIFIED },
       }),
       validate("param", SnapshotParams),
       validate("header", ConditionalHeaders),
@@ -220,7 +228,7 @@ export function statsRoutes(app: Hono<PithyHonoEnv>, now: () => Date = () => new
         return serveObject(
           c,
           snapshotKey(date, file),
-          () => snapshotCacheControl(date, now()),
+          () => snapshotCacheControl(date, now(), scheduleOf(c)),
           c.req.valid("header")["if-none-match"],
         );
       },

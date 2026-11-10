@@ -4,6 +4,7 @@ import { currentKey, snapshotKey } from "../../contract/objects";
 import { Latest, Summary } from "../../contract/stats";
 import { statsDatabase } from "../../data/tables";
 import { freshDatabase } from "../../data/testing";
+import type { Schedule } from "../../schedule";
 import {
   recordCollected,
   recordPackages,
@@ -17,6 +18,8 @@ import { publish } from "./publish";
 const REPO = "pithy-sh/pithy";
 const DAY = "2026-11-09";
 const NOW = new Date("2026-11-09T02:10:00Z");
+/** The defaults: a 02:00 UTC run, ready 15 minutes after. */
+const SCHEDULE: Schedule = { runStartMs: 2 * 3_600_000, readyAfterMs: 15 * 60_000 };
 const db = () => statsDatabase(env.DB);
 
 interface Put {
@@ -81,7 +84,7 @@ describe("publish", () => {
     await seedPackage("@pithy-sh/core", DAY, 10);
     const { bucket, puts } = recordingBucket();
 
-    const report = await publish(db(), bucket, REPO, DAY, NOW);
+    const report = await publish(db(), bucket, REPO, DAY, NOW, SCHEDULE);
 
     expect(puts.map((put) => put.key)).toEqual([
       snapshotKey(DAY, "summary"),
@@ -98,6 +101,21 @@ describe("publish", () => {
     expect(Latest.parse(latest)).toEqual(currentLatest);
   });
 
+  test("dates nextUpdate in both files, the snapshots included, by the schedule it is given", async () => {
+    await recordPackages(db(), ["@pithy-sh/core"], DAY);
+    await seedPackage("@pithy-sh/core", DAY, 10);
+    const { bucket, puts } = recordingBucket();
+
+    await publish(db(), bucket, REPO, DAY, NOW, { runStartMs: 2 * 3_600_000, readyAfterMs: 30 * 60_000 });
+
+    expect(puts).toHaveLength(4);
+    for (const put of puts) {
+      const file = JSON.parse(put.body);
+      expect(file.nextUpdate, put.key).toBe("2026-11-10T02:30:00.000Z");
+      expect(Date.parse(file.nextUpdate)).toBeGreaterThan(Date.parse(file.generatedAt));
+    }
+  });
+
   test("a build that fails the contract writes nothing", async () => {
     await recordPackages(db(), ["@pithy-sh/core"], DAY);
     await seedPackage("@pithy-sh/core", DAY, 10);
@@ -107,7 +125,7 @@ describe("publish", () => {
       .execute();
     const { bucket, puts } = recordingBucket();
 
-    await expect(publish(db(), bucket, REPO, DAY, NOW)).rejects.toThrow();
+    await expect(publish(db(), bucket, REPO, DAY, NOW, SCHEDULE)).rejects.toThrow();
     expect(puts).toEqual([]);
   });
 
@@ -119,7 +137,7 @@ describe("publish", () => {
     await recordCollected(db(), "jsdelivr", NOW);
     const { bucket, puts } = recordingBucket();
 
-    await publish(db(), bucket, REPO, DAY, NOW);
+    await publish(db(), bucket, REPO, DAY, NOW, SCHEDULE);
     const file = (key: string) => JSON.parse(puts.find((put) => put.key === key)?.body ?? "null");
     const latest = Latest.parse(file(currentKey("latest")));
     const summary = Summary.parse(file(currentKey("summary")));
@@ -135,9 +153,9 @@ describe("publish", () => {
   test("a re-run on the snapshot's own day rewrites it, since it is not immutable until the day is over", async () => {
     await recordPackages(db(), ["@pithy-sh/core"], DAY);
     await seedPackage("@pithy-sh/core", DAY, 10);
-    await publish(db(), env.PUBLISHED, REPO, DAY, NOW);
+    await publish(db(), env.PUBLISHED, REPO, DAY, NOW, SCHEDULE);
     await seedPackage("@pithy-sh/core", DAY, 20);
-    await publish(db(), env.PUBLISHED, REPO, DAY, new Date("2026-11-09T10:00:00Z"));
+    await publish(db(), env.PUBLISHED, REPO, DAY, new Date("2026-11-09T10:00:00Z"), SCHEDULE);
 
     const snapshot = Latest.parse(await (await env.PUBLISHED.get(snapshotKey(DAY, "latest")))?.json());
     expect(snapshot.downloads.kit).toEqual([20]);
@@ -146,11 +164,11 @@ describe("publish", () => {
   test("a run that publishes after its capture day is over never rewrites that day's snapshot", async () => {
     await recordPackages(db(), ["@pithy-sh/core"], DAY);
     await seedPackage("@pithy-sh/core", DAY, 10);
-    await publish(db(), env.PUBLISHED, REPO, DAY, NOW);
+    await publish(db(), env.PUBLISHED, REPO, DAY, NOW, SCHEDULE);
     const before = await (await env.PUBLISHED.get(snapshotKey(DAY, "latest")))?.text();
 
     await seedPackage("@pithy-sh/core", DAY, 20);
-    const report = await publish(db(), env.PUBLISHED, REPO, DAY, new Date("2026-11-10T00:01:00Z"));
+    const report = await publish(db(), env.PUBLISHED, REPO, DAY, new Date("2026-11-10T00:01:00Z"), SCHEDULE);
 
     expect(await (await env.PUBLISHED.get(snapshotKey(DAY, "latest")))?.text()).toBe(before);
     expect(Object.keys(report)).toEqual([currentKey("summary"), currentKey("latest")]);
@@ -161,7 +179,7 @@ describe("publish", () => {
   test("a run that publishes after its capture day still writes that day's snapshot when none exists", async () => {
     await recordPackages(db(), ["@pithy-sh/core"], DAY);
     await seedPackage("@pithy-sh/core", DAY, 10);
-    const report = await publish(db(), env.PUBLISHED, REPO, DAY, new Date("2026-11-10T00:01:00Z"));
+    const report = await publish(db(), env.PUBLISHED, REPO, DAY, new Date("2026-11-10T00:01:00Z"), SCHEDULE);
     expect(Object.keys(report)).toContain(snapshotKey(DAY, "latest"));
     expect(await env.PUBLISHED.head(snapshotKey(DAY, "latest"))).not.toBeNull();
   });

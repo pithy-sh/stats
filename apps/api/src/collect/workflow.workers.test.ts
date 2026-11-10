@@ -14,6 +14,7 @@ import { Latest, Summary } from "../contract/stats";
 import { statsDatabase, type statsTables } from "../data/tables";
 import { freshDatabase } from "../data/testing";
 import worker from "../index";
+import { COLLECT_CRON, dailyRunStart, nextUpdateAfter } from "../schedule";
 import { addDays, dayRanges } from "./day";
 import { markHistoryCollected } from "./history";
 import { gzip, tarArchive } from "./kit/testing";
@@ -33,14 +34,7 @@ import { MAX_RANGE_DAYS, NPM_API_GAP_MS } from "./upstream/npm";
 import { clock } from "./upstream/rateLimit";
 import { type StubAnswer, type StubCall, stubFetch } from "./upstream/testing";
 import { npmHistoryStart } from "./window";
-import {
-  COLLECT_CRON,
-  type CollectEnv,
-  type CollectStep,
-  DOWNLOAD_WINDOWS,
-  refillCommand,
-  runCollect,
-} from "./workflow";
+import { type CollectEnv, type CollectStep, DOWNLOAD_WINDOWS, refillCommand, runCollect } from "./workflow";
 
 const PACKAGES = ["@pithy-sh/auth", "@pithy-sh/core"];
 /** The day every test's {@link PACKAGES} were first seen and had their history collected: they are known. */
@@ -897,6 +891,12 @@ describe("the publish step", () => {
 
     // deps.dev is the last source step: its numbers in the file show the publish ran after it.
     expect(latest.depsDev.dependents).toBe(4);
+    // Dated by the Worker's READY_AFTER_MINUTES, 20 in the test runtime: the next run's ready time after the file.
+    const schedule = { runStartMs: dailyRunStart(COLLECT_CRON), readyAfterMs: 20 * 60_000 };
+    expect(latest.nextUpdate).toBe(nextUpdateAfter(new Date(latest.generatedAt), schedule).toISOString());
+    expect(latest.nextUpdate).toMatch(/T02:20:00\.000Z$/);
+    expect(Date.parse(latest.nextUpdate)).toBeGreaterThan(Date.parse(latest.generatedAt));
+    expect(summary.nextUpdate).toBe(latest.nextUpdate);
     expect(latest.packages.map((row) => row.name)).toEqual(PACKAGES);
     expect(latest.packages[0]?.description).toBe("A Pithy package.");
     expect(latest.github).toMatchObject({ stars: 50, commits: 900, createdAt: "2026-09-01T00:00:00.000Z" });

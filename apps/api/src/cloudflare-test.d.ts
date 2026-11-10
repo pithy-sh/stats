@@ -6,6 +6,7 @@
 declare namespace Cloudflare {
   interface Env {
     ENVIRONMENT: string;
+    READY_AFTER_MINUTES: string;
     DB: D1Database;
     PUBLISHED: R2Bucket;
     COLLECT: Workflow;

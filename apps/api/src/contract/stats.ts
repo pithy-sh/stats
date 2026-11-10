@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { READY_RULE } from "../schedule";
 
 /**
  * The JSON the API serves: `summary.json` for the home page strip and `latest.json` for the `/stats/` page.
@@ -19,6 +20,12 @@ const Date_ = z.iso.date().describe("A UTC day, `YYYY-MM-DD`.");
 const Count = z.number().int().nonnegative();
 const Series = z.array(Count.describe("One period's count.")).describe("A series of counts, oldest first.");
 const GeneratedAt = Time.describe("When the publish step ran.");
+const NEXT_UPDATE = `The time the next run after this file is ready: the first collector run to start after \`generatedAt\`, ready ${READY_RULE}. A cache may revalidate sooner: at the current run's ready time, or after five minutes while a run is late.`;
+const NextUpdate = Time.describe(NEXT_UPDATE);
+/** \`nextUpdate\` as a snapshot carries it: a snapshot is never rewritten once its day is over, so older ones lack it. */
+const SnapshotNextUpdate = Time.optional().describe(
+  `${NEXT_UPDATE} Absent from a snapshot published before the field was added to version 1.`,
+);
 const AsOf = Date_.describe(
   "The last complete day of npm downloads: the newest day held that npm had finished counting when it was collected.",
 );
@@ -27,6 +34,7 @@ export const Summary = z
   .object({
     version: Version,
     generatedAt: GeneratedAt,
+    nextUpdate: NextUpdate,
     asOf: AsOf,
     downloads: z
       .object({
@@ -85,6 +93,11 @@ export const Summary = z
   })
   .describe("The home page strip's headline numbers, served at `/v1/summary`. Nothing in it needs the history.");
 export type Summary = z.output<typeof Summary>;
+
+export const SnapshotSummary = Summary.extend({ nextUpdate: SnapshotNextUpdate }).describe(
+  "One day's `summary.json`, served at `/v1/snapshots/{date}/summary`: `Summary` as published that day.",
+);
+export type SnapshotSummary = z.output<typeof SnapshotSummary>;
 
 const SourceStatus = z
   .object({
@@ -158,6 +171,7 @@ export const Latest = z
   .object({
     version: Version,
     generatedAt: GeneratedAt,
+    nextUpdate: NextUpdate,
     asOf: AsOf,
     sources: z
       .object(
@@ -268,3 +282,8 @@ export const Latest = z
   })
   .describe("Everything the `/stats/` page draws, served at `/v1/latest`.");
 export type Latest = z.output<typeof Latest>;
+
+export const SnapshotLatest = Latest.extend({ nextUpdate: SnapshotNextUpdate }).describe(
+  "One day's `latest.json`, served at `/v1/snapshots/{date}/latest`: `Latest` as published that day.",
+);
+export type SnapshotLatest = z.output<typeof SnapshotLatest>;

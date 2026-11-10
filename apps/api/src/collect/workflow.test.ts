@@ -1,13 +1,6 @@
 import { describe, expect, test } from "vitest";
-import {
-  COLLECT_BINDING,
-  COLLECT_CRON,
-  CollectJob,
-  capturedOn,
-  collectWorkflows,
-  refillCommand,
-  runDay,
-} from "./workflow";
+import { COLLECT_CRON, dailyRunStart } from "../schedule";
+import { COLLECT_BINDING, CollectJob, capturedOn, collectWorkflows, refillCommand, runDay } from "./workflow";
 
 const event = (instanceId: string, timestamp = "2026-11-09T02:00:03Z") => ({
   payload: {},
@@ -23,6 +16,11 @@ describe("collectWorkflows", () => {
       className: "CollectWorkflow",
     });
     expect(COLLECT_CRON).toBe("0 2 * * *");
+  });
+
+  test("starts on the one cron the cache's ready time is derived from, a daily one", () => {
+    expect(collectWorkflows.collect?.schedule).toBe(COLLECT_CRON);
+    expect(dailyRunStart(collectWorkflows.collect?.schedule ?? "")).toBe(2 * 3_600_000);
   });
 
   test("accepts the cron's empty params", () => {

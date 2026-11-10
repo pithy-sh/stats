@@ -7,6 +7,7 @@ import type { SecretsStoreEnv } from "@pithy-sh/secrets/src/env/bindings";
 import { secretsStore } from "@pithy-sh/secrets/src/secretsStore";
 import { z } from "zod";
 import { type StatsDatabase, statsDatabase } from "../data/tables";
+import { COLLECT_CRON, readSchedule } from "../schedule";
 import { GITHUB_TOKEN, statsSecretRegistry } from "../secret/registry";
 import { Day, type DayRange, utcDay } from "./day";
 import { markHistoryCollected, readHistoryState } from "./history";
@@ -67,12 +68,6 @@ export const FIRST_PUBLISH_DAY: Day = "2026-09-05";
 
 /** The binding the collector Workflow is reached by. */
 export const COLLECT_BINDING = "COLLECT";
-/**
- * Every day at 02:00 UTC. npm may still be counting the day before by then, so each run asks npm which day it has
- * last finished instead of assuming it.
- */
-export const COLLECT_CRON = "0 2 * * *";
-
 export const CollectJob = z
   .object({
     date: Day.optional().describe(
@@ -123,13 +118,15 @@ export function refillCommand(environment: string, day: Day, failedAt: Date): st
 
 /**
  * What the collector needs off the Worker env: the app D1, the secrets the GitHub token is read from, the R2
- * bucket the publish step writes to, and the environment's name.
+ * bucket the publish step writes to, the environment's name, and the ready delay `nextUpdate` is dated with.
  */
 export interface CollectEnv extends SecretsStoreEnv {
   /** The environment's name, which every log record the run writes carries. wrangler.jsonc sets it per environment. */
   ENVIRONMENT: string;
   DB: D1Database;
   PUBLISHED: R2Bucket;
+  /** Whole minutes from a run's start to the time its files are taken to be ready. Absent or invalid: 15. */
+  READY_AFTER_MINUTES?: string;
 }
 
 /** The one step method the collector uses. */
@@ -613,7 +610,7 @@ export async function runCollect(
   }
 
   const published = await loggedStep(step, log, PUBLISH, PUBLISH_STEP, () =>
-    publish(db, env.PUBLISHED, KIT_REPO, today, now()),
+    publish(db, env.PUBLISHED, KIT_REPO, today, now(), readSchedule(env, log)),
   );
 
   if (failed.length > 0) {

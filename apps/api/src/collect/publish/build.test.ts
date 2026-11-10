@@ -1,11 +1,14 @@
 import { describe, expect, test } from "vitest";
 import { Latest, Summary } from "../../contract/stats";
 import type { Issue, PullRequest } from "../../data/tables";
+import type { Schedule } from "../../schedule";
 import { STEPS } from "../workflow";
 import { buildLatest, buildSummary, type PublishRows, SOURCE_STEPS } from "./build";
 
 const REPO = "pithy-sh/pithy";
 const NOW = new Date("2026-11-09T02:10:00Z");
+/** The defaults: a 02:00 UTC run, ready 15 minutes after. */
+const SCHEDULE: Schedule = { runStartMs: 2 * 3_600_000, readyAfterMs: 15 * 60_000 };
 const at = (value: string) => new Date(value);
 
 function issue(number: number, fields: Partial<Issue>): Issue {
@@ -184,7 +187,7 @@ describe("SOURCE_STEPS", () => {
 });
 
 describe("buildLatest", () => {
-  const latest = buildLatest(rows(), { repo: REPO }, NOW);
+  const latest = buildLatest(rows(), { repo: REPO }, NOW, SCHEDULE);
 
   test("parses as the contract", () => {
     expect(Latest.parse(latest)).toEqual(latest);
@@ -192,6 +195,21 @@ describe("buildLatest", () => {
 
   test("carries the version, when it was built and the last complete day", () => {
     expect(latest).toMatchObject({ version: 1, generatedAt: "2026-11-09T02:10:00.000Z", asOf: "2026-11-08" });
+  });
+
+  test("says when the next file is due: the next run's ready time, after generatedAt", () => {
+    // Built by the 02:00 run before its own 02:15 ready time, so the next file is tomorrow's.
+    expect(latest.nextUpdate).toBe("2026-11-10T02:15:00.000Z");
+    expect(Date.parse(latest.nextUpdate)).toBeGreaterThan(Date.parse(latest.generatedAt));
+  });
+
+  test("derives nextUpdate from the schedule it is given", () => {
+    const hourLater: Schedule = { runStartMs: 2 * 3_600_000, readyAfterMs: 60 * 60_000 };
+    expect(buildLatest(rows(), { repo: REPO }, NOW, hourLater).nextUpdate).toBe("2026-11-10T03:00:00.000Z");
+    // A manual run before today's cron: today's run is the next one.
+    expect(buildLatest(rows(), { repo: REPO }, at("2026-11-09T01:00:00Z"), SCHEDULE).nextUpdate).toBe(
+      "2026-11-09T02:15:00.000Z",
+    );
   });
 
   test("dates each source by its stalest step, and leaves never-collected ones null", () => {
@@ -248,7 +266,7 @@ describe("buildLatest", () => {
       { packageName: "@pithy-sh/core", capturedOn: "2026-11-09", period: "month", hits: 70, bandwidth: 1, rank: null },
       { packageName: "@pithy-sh/auth", capturedOn: "2026-11-01", period: "month", hits: 500, bandwidth: 1, rank: null },
     ];
-    const stale = buildLatest(mixed, { repo: REPO }, NOW);
+    const stale = buildLatest(mixed, { repo: REPO }, NOW, SCHEDULE);
     expect(stale.jsdelivr).toEqual({ start: "2026-10-10", end: "2026-11-08", total: 70 });
     // The jsDelivr step last finished before the newest capture day, so a package with no row that day is unknown.
     expect(Object.fromEntries(stale.packages.map((row) => [row.name, row.jsdelivr]))).toEqual({
@@ -259,7 +277,7 @@ describe("buildLatest", () => {
 
     // Once the step finished on that day, a package with no row is one jsDelivr does not know: zero requests.
     mixed.collections = [...mixed.collections, { step: "jsdelivr", collectedAt: at("2026-11-09T02:01:00Z") }];
-    const done = buildLatest(mixed, { repo: REPO }, NOW);
+    const done = buildLatest(mixed, { repo: REPO }, NOW, SCHEDULE);
     expect(done.jsdelivr.total).toBe(70);
     expect(Object.fromEntries(done.packages.map((row) => [row.name, row.jsdelivr]))).toEqual({
       "@pithy-sh/auth": 0,
@@ -333,12 +351,12 @@ describe("buildLatest", () => {
   });
 
   test("leaves the kit's own numbers null until they are counted", () => {
-    const bare = buildLatest(empty, { repo: REPO }, NOW);
+    const bare = buildLatest(empty, { repo: REPO }, NOW, SCHEDULE);
     expect(bare.kit).toEqual({ commit: null, countedAt: null, tests: null, codeLines: null, history: [] });
   });
 
   test("leaves every source null, never zero, before anything is collected", () => {
-    const bare = buildLatest(empty, { repo: REPO }, NOW);
+    const bare = buildLatest(empty, { repo: REPO }, NOW, SCHEDULE);
     expect(Latest.parse(bare)).toEqual(bare);
     expect(bare.asOf).toBe("2026-11-08");
     expect(bare.github).toMatchObject({ repo: REPO, stars: null, commitWeeks: null, weekStart: "2026-11-09" });
@@ -353,7 +371,7 @@ describe("buildLatest", () => {
 
   test("leaves the download series null, never [0], while the package list is read but no download is", () => {
     const listed = { ...empty, packages: ["@pithy-sh/core"] };
-    const latest = buildLatest(listed, { repo: REPO }, NOW);
+    const latest = buildLatest(listed, { repo: REPO }, NOW, SCHEDULE);
     expect(Latest.parse(latest)).toEqual(latest);
     expect(latest.downloads).toEqual({ start: null, end: null, kit: null });
     expect(latest.packages[0]?.daily).toBeNull();
@@ -378,7 +396,7 @@ describe("only days npm has counted", () => {
   }
 
   test("a day after npm's last complete day is never asOf, and never reaches a series", () => {
-    const latest = buildLatest(early(), { repo: REPO }, NOW);
+    const latest = buildLatest(early(), { repo: REPO }, NOW, SCHEDULE);
     expect(latest.asOf).toBe("2026-11-07");
     expect(latest.downloads).toEqual({ start: "2026-11-02", end: "2026-11-07", kit: [1, 2, 3, 4, 5, 6] });
     expect(latest.packages.find((row) => row.name === "@pithy-sh/core")?.daily).toEqual([1, 2, 3, 4, 5, 6]);
@@ -386,7 +404,7 @@ describe("only days npm has counted", () => {
 
   test("summary windows end at npm's last complete day", () => {
     const input = early();
-    expect(buildSummary(input, buildLatest(input, { repo: REPO }, NOW))).toMatchObject({
+    expect(buildSummary(input, buildLatest(input, { repo: REPO }, NOW, SCHEDULE))).toMatchObject({
       asOf: "2026-11-07",
       downloads: { allTime: 21, last30: 21, prior30: 0, last7: 21, prior7: 0 },
     });
@@ -398,7 +416,7 @@ describe("only days npm has counted", () => {
       { capturedOn: "2026-11-08", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
       { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
     ];
-    expect(buildLatest(input, { repo: REPO }, NOW).asOf).toBe("2026-11-07");
+    expect(buildLatest(input, { repo: REPO }, NOW, SCHEDULE).asOf).toBe("2026-11-07");
   });
 
   test("asOf is the newest day held when npm has counted further than the run wrote", () => {
@@ -406,7 +424,7 @@ describe("only days npm has counted", () => {
     input.npmDays = [
       { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: "2026-11-03", weekEnd: "2026-11-09" },
     ];
-    const latest = buildLatest(input, { repo: REPO }, NOW);
+    const latest = buildLatest(input, { repo: REPO }, NOW, SCHEDULE);
     expect(latest.asOf).toBe("2026-11-08");
     expect(latest.downloads.end).toBe("2026-11-08");
   });
@@ -422,6 +440,7 @@ describe("only days npm has counted", () => {
         },
         { repo: REPO },
         NOW,
+        SCHEDULE,
       ).asOf,
     ).toBe("2026-11-07");
   });
@@ -434,7 +453,9 @@ describe("only days npm has counted", () => {
     input.npmDays = [
       { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
     ];
-    const core = buildLatest(input, { repo: REPO }, NOW).packages.find((row) => row.name === "@pithy-sh/core");
+    const core = buildLatest(input, { repo: REPO }, NOW, SCHEDULE).packages.find(
+      (row) => row.name === "@pithy-sh/core",
+    );
     expect(core?.versionWeeks).toEqual([{ start: "2026-11-02", end: "2026-11-08", counts: { "0.1.0": 1730 } }]);
   });
 
@@ -447,7 +468,9 @@ describe("only days npm has counted", () => {
     input.npmDays = [
       { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
     ];
-    const core = buildLatest(input, { repo: REPO }, NOW).packages.find((row) => row.name === "@pithy-sh/core");
+    const core = buildLatest(input, { repo: REPO }, NOW, SCHEDULE).packages.find(
+      (row) => row.name === "@pithy-sh/core",
+    );
     expect(core?.versionWeeks).toEqual([{ start: "2026-11-02", end: "2026-11-08", counts: { "0.1.0": 1730 } }]);
   });
 
@@ -461,7 +484,7 @@ describe("only days npm has counted", () => {
       { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
       { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: null, weekEnd: null },
     ];
-    const latest = buildLatest(input, { repo: REPO }, NOW);
+    const latest = buildLatest(input, { repo: REPO }, NOW, SCHEDULE);
     expect(latest.asOf).toBe("2026-11-08");
     const core = latest.packages.find((row) => row.name === "@pithy-sh/core");
     expect(core?.versionWeeks).toEqual([{ start: "2026-11-01", end: "2026-11-07", counts: { "0.1.0": 1500 } }]);
@@ -470,7 +493,7 @@ describe("only days npm has counted", () => {
 
 describe("buildSummary", () => {
   const input = rows();
-  const summary = buildSummary(input, buildLatest(input, { repo: REPO }, NOW));
+  const summary = buildSummary(input, buildLatest(input, { repo: REPO }, NOW, SCHEDULE));
 
   test("parses as the contract and carries only headline numbers", () => {
     expect(Summary.parse(summary)).toEqual(summary);
@@ -482,6 +505,7 @@ describe("buildSummary", () => {
     expect(summary).toEqual({
       version: 1,
       generatedAt: "2026-11-09T02:10:00.000Z",
+      nextUpdate: "2026-11-10T02:15:00.000Z",
       asOf: "2026-11-08",
       downloads: { since: "2026-11-02", allTime: 128, last30: 128, prior30: 0, last7: 128, prior7: 0 },
       releases: { packages: 2, versions: 3, releaseDays: 2, latestAt: "2026-11-05T12:00:00.000Z" },
@@ -500,12 +524,12 @@ describe("buildSummary", () => {
       day: new Date(Date.UTC(2026, 9, 26 + index)).toISOString().slice(0, 10),
       downloads: index < 7 ? 1 : 10,
     }));
-    const windows = buildSummary(long, buildLatest(long, { repo: REPO }, NOW)).downloads;
+    const windows = buildSummary(long, buildLatest(long, { repo: REPO }, NOW, SCHEDULE)).downloads;
     expect(windows).toMatchObject({ allTime: 77, last7: 70, prior7: 7, last30: 77, prior30: 0 });
   });
 
   test("is null, never zero, before anything is collected", () => {
-    const bare = buildSummary(empty, buildLatest(empty, { repo: REPO }, NOW));
+    const bare = buildSummary(empty, buildLatest(empty, { repo: REPO }, NOW, SCHEDULE));
     expect(Summary.parse(bare)).toEqual(bare);
     expect(bare.downloads).toEqual({
       since: null,

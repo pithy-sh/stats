@@ -1,6 +1,7 @@
 import { currentKey, PUBLISHED_FILES, type PublishedFile, snapshotKey } from "../../contract/objects";
 import { Latest, Summary } from "../../contract/stats";
 import type { StatsDatabase } from "../../data/tables";
+import type { Schedule } from "../../schedule";
 import { type Day, utcDay } from "../day";
 import { buildLatest, buildSummary } from "./build";
 import { readPublishRows } from "./read";
@@ -11,7 +12,7 @@ export type PublishReport = Record<string, number>;
 const JSON_METADATA = { contentType: "application/json; charset=utf-8" } as const;
 
 /**
- * Build `summary.json` and `latest.json` from D1 as of `now`, and write each to R2 twice: as the dated snapshot for
+ * Build `summary.json` and `latest.json` from D1 as of `now`, their `nextUpdate` dated by `schedule`, and write each to R2 twice: as the dated snapshot for
  * `day` and as the current copy. The snapshots go first, so a current copy never names a day with no snapshot.
  * Both files are parsed through the contract before anything is written, so a malformed build writes nothing.
  *
@@ -25,9 +26,10 @@ export async function publish(
   repo: string,
   day: Day,
   now: Date,
+  schedule: Schedule,
 ): Promise<PublishReport> {
   const rows = await readPublishRows(db, repo);
-  const latest = Latest.parse(buildLatest(rows, { repo }, now));
+  const latest = Latest.parse(buildLatest(rows, { repo }, now, schedule));
   const summary = Summary.parse(buildSummary(rows, latest));
   const bodies: Record<PublishedFile, string> = { summary: JSON.stringify(summary), latest: JSON.stringify(latest) };
   const dayIsOver = day < utcDay(now);

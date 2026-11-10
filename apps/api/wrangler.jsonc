@@ -97,7 +97,7 @@
         {
           "binding": "GITHUB_TOKEN",
           "store_id": "b52f80e7453f4abeabc6de9528a11edb",
-          "secret_name": "stats-staging-github-token"
+          "secret_name": "stats-global-github-token"
         }
       ]
     },
@@ -133,7 +133,7 @@
         {
           "binding": "GITHUB_TOKEN",
           "store_id": "b52f80e7453f4abeabc6de9528a11edb",
-          "secret_name": "stats-prod-github-token"
+          "secret_name": "stats-global-github-token"
         }
       ]
     }

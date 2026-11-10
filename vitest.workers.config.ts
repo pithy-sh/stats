@@ -13,6 +13,7 @@ import { defineConfig } from "vitest/config";
 // `main` is the api Worker, because a Workflow's class resolves on the main module: the collector runs in
 // the real Workflows engine, and a test drives it through the `COLLECT` binding. `GITHUB_TOKEN` stands in
 // for the Secrets Store binding, which `secretsStore` reads as a plain string the way local dev does.
+// `ENVIRONMENT` is the var every log record the collector writes carries, as wrangler.jsonc sets it per environment.
 //
 // The bindings here are declared for the *test* runtime, not read from a Worker's wrangler.jsonc — one
 // test run covers every Worker under apps/, and they do not all declare the same bindings. Add a
@@ -28,7 +29,11 @@ export default defineConfig({
         d1Databases: ["DB", "SECRETS"],
         r2Buckets: ["PUBLISHED"],
         workflows: { COLLECT: { name: "stats-test-api-collect", className: "CollectWorkflow" } },
-        bindings: { GITHUB_TOKEN: "test-github-token", SECRETS_ENCRYPTION_KEYS: devEncryptionKeys() },
+        bindings: {
+          ENVIRONMENT: "test",
+          GITHUB_TOKEN: "test-github-token",
+          SECRETS_ENCRYPTION_KEYS: devEncryptionKeys(),
+        },
       },
     }),
   ],

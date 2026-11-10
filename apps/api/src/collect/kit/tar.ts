@@ -28,8 +28,13 @@ class ByteQueue {
   private readonly chunks: Uint8Array[] = [];
   private buffered = 0;
   private done = false;
+  private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
 
-  constructor(private readonly reader: ReadableStreamDefaultReader<Uint8Array>) {}
+  // Assigned by hand rather than as a parameter property: the `pithy` CLI loads pithy.config.ts, which imports
+  // this module, under Node's type stripping, and that refuses parameter properties.
+  constructor(reader: ReadableStreamDefaultReader<Uint8Array>) {
+    this.reader = reader;
+  }
 
   /** Wait until `n` bytes are buffered or the stream has ended; answer whether they are. */
   private async fill(n: number): Promise<boolean> {

@@ -25,6 +25,8 @@ async function send(fetcher: Fetcher, url: string, options: RequestOptions): Pro
       headers: { accept: "application/json", "user-agent": USER_AGENT, ...options.headers },
     });
   } catch (cause) {
+    // A rate limit that outlasted its retries already says what happened, more exactly than this would.
+    if (cause instanceof UpstreamError) throw cause;
     throw new UpstreamError({ detail: `${options.method ?? "GET"} ${url} did not answer.` }, { cause });
   }
 }

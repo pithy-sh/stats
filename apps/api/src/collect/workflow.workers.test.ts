@@ -23,6 +23,8 @@ import {
   writeRepo,
   writeVersionDownloads,
 } from "./store";
+import { NPM_API_GAP_MS } from "./upstream/npm";
+import { clock } from "./upstream/rateLimit";
 import { type StubAnswer, type StubCall, stubFetch } from "./upstream/testing";
 import { COLLECT_CRON } from "./workflow";
 
@@ -193,11 +195,51 @@ function upstreams(
   });
 }
 
-/** Route the runtime's `fetch` to a stub table. The Workflow's steps run in this isolate, so they see it. */
+/** Every wait the collector asked for while upstreams were stubbed: pacing and rate-limit backoff alike. */
+let sleeps: number[] = [];
+
+/**
+ * The collector's time while upstreams are stubbed: it moves only when the collector sleeps, and never backwards
+ * from one test to the next, since npm's pace is kept for the whole isolate.
+ */
+let virtualNow = Date.now();
+
+/**
+ * Route the runtime's `fetch` to a stub table, and answer every wait at once while recording it and moving the
+ * collector's clock past it. The Workflow's steps run in this isolate, so they see all of it.
+ */
 function stubUpstreams(stub: ReturnType<typeof stubFetch>): void {
   vi.spyOn(globalThis, "fetch").mockImplementation((input, init) =>
     stub.fetch(input instanceof Request ? input.url : String(input), init),
   );
+  sleeps = [];
+  vi.spyOn(clock, "now").mockImplementation(() => virtualNow);
+  vi.spyOn(clock, "sleep").mockImplementation(async (ms) => {
+    sleeps.push(ms);
+    virtualNow += ms;
+  });
+}
+
+/** `upstreams()` with some routes answered differently. */
+function upstreamsWith(
+  overrides: Record<string, StubAnswer | ((call: StubCall) => StubAnswer)>,
+): ReturnType<typeof stubFetch> {
+  const base = upstreams();
+  const changed = stubFetch(overrides);
+  const calls: StubCall[] = [];
+  return {
+    calls,
+    fetch: async (url, init) => {
+      const answer = await changed.fetch(url, init);
+      if (answer.status !== 599) {
+        calls.push(changed.calls[changed.calls.length - 1] as StubCall);
+        return answer;
+      }
+      const fallback = await base.fetch(url, init);
+      calls.push(base.calls[base.calls.length - 1] as StubCall);
+      return fallback;
+    },
+  };
 }
 
 const db = () => statsDatabase(env.DB);
@@ -549,7 +591,7 @@ describe("each source is its own step", () => {
     await using instance = await introspectWorkflowInstance(env.COLLECT, "exhausted");
     await instance.modify(async (m) => {
       await m.disableRetryDelays();
-      await m.mockStepError({ name: "jsdelivr" }, new Error("jsDelivr is down"));
+      for (const name of PACKAGES) await m.mockStepError({ name: `jsdelivr ${name}` }, new Error("jsDelivr is down"));
     });
     await env.COLLECT.create({ id: "exhausted", params: { date: "2026-11-09" } });
     await instance.waitForStatus("errored");
@@ -593,6 +635,158 @@ describe("each source is its own step", () => {
     await env.COLLECT.create({ id: "no-list", params: { date: "2026-11-09" } });
     await instance.waitForStatus("errored");
     expect(stub.calls).toHaveLength(0);
+  });
+});
+
+describe("per-package steps", () => {
+  test("every per-package source runs one step per package, then one recording it complete", async () => {
+    stubUpstreams(upstreams());
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "per-package");
+    await env.COLLECT.create({ id: "per-package", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("complete");
+
+    for (const source of ["registry", "daily downloads", "version downloads", "jsdelivr", "deps.dev"]) {
+      for (const name of PACKAGES) {
+        expect(await instance.waitForStepResult({ name: `${source} ${name}` }), `${source} ${name}`).toEqual(
+          expect.any(Number),
+        );
+      }
+      expect(await instance.waitForStepResult({ name: source })).toBe(0);
+    }
+    expect(await instance.waitForStepResult({ name: "deps.dev scorecard" })).toBe(1);
+    expect(await instance.waitForStepResult({ name: "daily downloads @pithy-sh/core" })).toBe(3);
+  });
+
+  test("a package that exhausts its retries leaves the other packages' rows written, and the run's failure names it", async () => {
+    const failing = "@pithy-sh/core";
+    const stub = upstreamsWith({
+      [`https://api.npmjs.org/downloads/range/2026-11-06:2026-11-08/${failing}`]: { status: 503 },
+    });
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "one-package-down");
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+    });
+    await env.COLLECT.create({ id: "one-package-down", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("errored");
+
+    const message = (await instance.getError()).message;
+    expect(message).toContain(`daily downloads (${failing})`);
+    const daily = await db().selectFrom("dailyDownloads").select("packageName").execute();
+    expect(daily.map((row) => row.packageName)).toEqual(["@pithy-sh/auth", "@pithy-sh/auth", "@pithy-sh/auth"]);
+    const ranges = stub.calls.filter((call) => call.url.startsWith("https://api.npmjs.org/downloads/range/"));
+    expect(ranges.filter((call) => call.url.endsWith("@pithy-sh/auth"))).toHaveLength(1);
+    const collected = await db().selectFrom("collections").select("step").execute();
+    expect(collected.map((row) => row.step)).not.toContain("dailyDownloads");
+    expect(collected.map((row) => row.step)).toContain("versionDownloads");
+    expect(await count("versionDownloads")).toBe(4);
+    // The run still publishes everything that did write.
+    expect(await published(currentKey("latest"))).not.toBeNull();
+  });
+
+  test("a source tries every package however many fail, and its failure names only the ones that did", async () => {
+    const many = Array.from({ length: 8 }, (_, i) => `@pithy-sh/p${i}`);
+    // Four in a row, then failures between successes: neither a run of failures nor their total stops the source.
+    const failing = new Set(["p0", "p1", "p2", "p3", "p5", "p7"].map((short) => `@pithy-sh/${short}`));
+    const cdn = "https://data.jsdelivr.com/v1/stats/packages/npm/";
+    const stub = upstreamsWith({
+      "https://registry.npmjs.org/-/org/pithy-sh/package": { json: Object.fromEntries(many.map((n) => [n, "write"])) },
+      [`${cdn}*`]: (call) =>
+        failing.has(call.url.slice(cdn.length).split("?")[0] ?? "") ? { status: 500 } : { status: 599 },
+    });
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "many-down");
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+    });
+    await env.COLLECT.create({ id: "many-down", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("errored");
+
+    const tried = new Set(stub.calls.filter((call) => call.url.startsWith(cdn)).map((call) => call.url));
+    expect(tried.size).toBe(many.length);
+    const cdnRows = await db().selectFrom("cdnLatest").select("packageName").orderBy("packageName").execute();
+    expect(cdnRows.map((row) => row.packageName)).toEqual(["@pithy-sh/p4", "@pithy-sh/p6"]);
+    const message = (await instance.getError()).message;
+    expect(message).toContain(`jsdelivr (${[...failing].join(", ")})`);
+    expect(message).not.toContain("not tried");
+    expect(await count("dependentLatest")).toBe(many.length);
+  });
+
+  test("a source whose packages all wrote but whose completion step fails keeps their rows, and the run names it", async () => {
+    stubUpstreams(upstreams());
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "no-completion");
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+      await m.mockStepError({ name: "jsdelivr" }, new Error("D1 is down"));
+    });
+    await env.COLLECT.create({ id: "no-completion", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("errored");
+
+    expect((await instance.getError()).message).toContain("could not collect: jsdelivr.");
+    expect(await count("cdnLatest")).toBe(PACKAGES.length);
+    const collected = await db().selectFrom("collections").select("step").execute();
+    expect(collected.map((row) => row.step)).not.toContain("jsdelivr");
+    expect(collected.map((row) => row.step)).toContain("depsDev");
+  });
+});
+
+describe("npm's rate limit", () => {
+  test("a burst of 429s is retried in place and the run completes with every row", async () => {
+    let refused = 0;
+    const stub = upstreamsWith({
+      "https://api.npmjs.org/versions/*": () =>
+        ++refused <= 4 ? { status: 429, headers: { "retry-after": "0" } } : { json: { downloads: { "0.1.0": 3 } } },
+    });
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "npm-burst");
+    await env.COLLECT.create({ id: "npm-burst", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("complete");
+
+    expect(await count("versionDownloads")).toBe(PACKAGES.length);
+    expect(stub.calls.filter((call) => call.url.startsWith("https://api.npmjs.org/versions/"))).toHaveLength(
+      PACKAGES.length + 4,
+    );
+  });
+
+  test("requests to npm's downloads API are paced by the measured gap", async () => {
+    stubUpstreams(upstreams());
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "paced");
+    await env.COLLECT.create({ id: "paced", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("complete");
+    // Four npm requests (two packages, two sources), each waiting out the gap after the one before it. The first
+    // waits too when an earlier test's request was the last to go, since time moves here only by sleeping.
+    expect(sleeps.length).toBeGreaterThanOrEqual(3);
+    expect(sleeps.every((ms) => ms === NPM_API_GAP_MS)).toBe(true);
+  });
+});
+
+describe("why a step failed", () => {
+  test("its upstream detail reaches the Worker log, and the token and headers never do", async () => {
+    stubUpstreams(
+      upstreamsWith({ "https://api.github.com/graphql": { status: 401, json: { message: "Bad credentials" } } }),
+    );
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "logged");
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+    });
+    await env.COLLECT.create({ id: "logged", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("errored");
+
+    const failures = lines.filter((line) => line.includes("collector step failed"));
+    expect(failures.length).toBeGreaterThan(0);
+    const github = failures.filter((line) => line.includes('"step":"github"'));
+    expect(github.length).toBeGreaterThan(0);
+    expect(github[0]).toContain("https://api.github.com/graphql answered 401.");
+    expect(github[0]).toContain('"instance":"logged"');
+    for (const line of lines) {
+      expect(line).not.toContain(TOKEN);
+      expect(line.toLowerCase()).not.toContain("authorization");
+      expect(line).not.toContain("Bearer");
+    }
   });
 });
 
@@ -648,7 +842,7 @@ describe("the publish step", () => {
     await using instance = await introspectWorkflowInstance(env.COLLECT, "publish-stale");
     await instance.modify(async (m) => {
       await m.disableRetryDelays();
-      await m.mockStepError({ name: "jsdelivr" }, new Error("jsDelivr is down"));
+      for (const name of PACKAGES) await m.mockStepError({ name: `jsdelivr ${name}` }, new Error("jsDelivr is down"));
     });
     await env.COLLECT.create({ id: "publish-stale", params: { date: "2026-11-09" } });
     await instance.waitForStatus("errored");

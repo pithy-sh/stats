@@ -20,6 +20,7 @@ import { APP_MIGRATION_ORDER, RETAINED_TABLES, statsTables } from "./src/data/ta
 import { STATS_MIGRATIONS } from "./src/migrations/index";
 import { statsSecretRegistry } from "./src/secret/registry";
 import { statsRoutes } from "./src/serve/routes";
+import { VARS } from "./src/vars";
 
 // Where this Worker answers, per environment. Declare it once here and the
 // `routes` entry and `vars.BASE_URL` in wrangler.jsonc are generated from it —
@@ -92,6 +93,9 @@ const config = {
     }),
     // pithy:capabilities (managed region — do not remove this marker)
   ],
+  // This Worker's own wrangler vars: `pithy worker sync` writes each into every stanza of wrangler.jsonc, and the
+  // Worker reads them typed with `VARS.read(env)`. See src/vars.ts.
+  vars: VARS,
   app,
 };
 

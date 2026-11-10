@@ -125,8 +125,8 @@ export interface CollectEnv extends SecretsStoreEnv {
   ENVIRONMENT: string;
   DB: D1Database;
   PUBLISHED: R2Bucket;
-  /** Whole minutes from a run's start to the time its files are taken to be ready. Absent or invalid: 15. */
-  READY_AFTER_MINUTES?: string;
+  /** Whole minutes from a run's start to the time its files are taken to be ready, read through `VARS`. */
+  READY_AFTER_MINUTES?: unknown;
 }
 
 /** The one step method the collector uses. */

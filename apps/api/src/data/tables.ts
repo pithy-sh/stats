@@ -55,6 +55,22 @@ export const VersionDownload = z
   .describe("One version's seven-day downloads as npm reported them on one capture day, in `version_downloads`.");
 export type VersionDownload = z.output<typeof VersionDownload>;
 
+export const NpmCountedDays = z
+  .object({
+    capturedOn: CapturedOn,
+    lastDay: Day.describe("The newest day npm's downloads API had finished counting on the capture day."),
+    weekStart: Day.nullable().describe(
+      "The first day of the seven its `last-week` counts covered on the capture day, or null when the per-version counts captured that day are not known to cover one week.",
+    ),
+    weekEnd: Day.nullable().describe(
+      "The last day of the seven its `last-week` counts covered on the capture day, or null alongside `weekStart`.",
+    ),
+  })
+  .describe(
+    "Which days npm had counted on one capture day, in `npm_days`. The per-version counts captured that day cover its week, when it has one.",
+  );
+export type NpmCountedDays = z.output<typeof NpmCountedDays>;
+
 export const VersionPublish = z
   .object({
     packageName: PackageName,
@@ -203,6 +219,7 @@ export const statsTables = {
   packages: Package,
   dailyDownloads: DailyDownload,
   versionDownloads: VersionDownload,
+  npmDays: NpmCountedDays,
   versionPublishes: VersionPublish,
   registrySnapshots: RegistrySnapshot,
   registryLatest: RegistrySnapshot,
@@ -225,12 +242,14 @@ export const statsTables = {
 
 /**
  * The tables whose rows exist nowhere else once an upstream's window has passed: npm keeps eighteen months
- * of daily downloads and seven days of per-version counts, no upstream keeps yesterday's snapshot, and the kit's
- * counts are kept by the day they were taken, which its history does not record.
+ * of daily downloads and seven days of per-version counts, and never says again which week those counted; no
+ * upstream keeps yesterday's snapshot; and the kit's counts are kept by the day they were taken, which its history
+ * does not record.
  */
 export const RETAINED_TABLES = [
   "dailyDownloads",
   "versionDownloads",
+  "npmDays",
   "registrySnapshots",
   "repoSnapshots",
   "issueSnapshots",

@@ -1,5 +1,14 @@
+import { UpstreamError } from "@pithy-sh/core/src/error/pithyError";
 import { describe, expect, test } from "vitest";
-import { fetchDailyDownloads, fetchOrgPackages, fetchRegistry, fetchVersionDownloads } from "./npm";
+import { addDays } from "../day";
+import {
+  fetchDailyDownloads,
+  fetchNpmDays,
+  fetchNpmWeek,
+  fetchOrgPackages,
+  fetchRegistry,
+  fetchVersionDownloads,
+} from "./npm";
 import { stubFetch } from "./testing";
 
 describe("fetchOrgPackages", () => {
@@ -149,5 +158,94 @@ describe("fetchRegistry", () => {
       dependencies: {},
       peerDependencies: {},
     });
+  });
+});
+
+describe("fetchNpmDays", () => {
+  const TODAY = "2026-11-10";
+  const POINT = "https://api.npmjs.org/downloads/point/";
+  const point = (name: string, start: string, end: string) => ({
+    json: { downloads: 36, start, end, package: name },
+  });
+
+  test("reads npm's last complete day and its last-week window off one package, one request each", async () => {
+    const stub = stubFetch({
+      [`${POINT}last-day/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-08", "2026-11-08"),
+      [`${POINT}last-week/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-02", "2026-11-08"),
+    });
+    expect(await fetchNpmDays(stub.fetch, ["@pithy-sh/auth", "@pithy-sh/core"], TODAY)).toEqual({
+      package: "@pithy-sh/auth",
+      lastDay: "2026-11-08",
+      lastWeek: { start: "2026-11-02", end: "2026-11-08" },
+    });
+    expect(stub.calls.map((call) => call.url)).toEqual([
+      `${POINT}last-day/@pithy-sh/auth`,
+      `${POINT}last-week/@pithy-sh/auth`,
+    ]);
+  });
+
+  test("asks the next package when npm has no stats for one", async () => {
+    const stub = stubFetch({
+      [`${POINT}last-day/@pithy-sh/auth`]: { status: 404, json: { error: "package @pithy-sh/auth not found" } },
+      [`${POINT}last-day/@pithy-sh/core`]: point("@pithy-sh/core", "2026-11-08", "2026-11-08"),
+      [`${POINT}last-week/@pithy-sh/core`]: point("@pithy-sh/core", "2026-11-02", "2026-11-08"),
+    });
+    expect(await fetchNpmDays(stub.fetch, ["@pithy-sh/auth", "@pithy-sh/core"], TODAY)).toEqual({
+      package: "@pithy-sh/core",
+      lastDay: "2026-11-08",
+      lastWeek: { start: "2026-11-02", end: "2026-11-08" },
+    });
+    expect(stub.calls).toHaveLength(3);
+  });
+
+  test("fails when no package has stats, rather than guess a day", async () => {
+    const stub = stubFetch({ [`${POINT}*`]: { status: 404, json: { error: "not found" } } });
+    await expect(fetchNpmDays(stub.fetch, ["@pithy-sh/auth"], TODAY)).rejects.toBeInstanceOf(UpstreamError);
+    await expect(fetchNpmDays(stub.fetch, [], TODAY)).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  test("fails on an answer that is not a single day, so a malformed probe never caps a window", async () => {
+    const stub = stubFetch({
+      [`${POINT}last-day/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-07", "2026-11-08"),
+      [`${POINT}last-week/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-02", "2026-11-08"),
+    });
+    await expect(fetchNpmDays(stub.fetch, ["@pithy-sh/auth"], TODAY)).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  test("fails when last-week does not end on last-day, so a week that does not match is never recorded", async () => {
+    const stub = stubFetch({
+      [`${POINT}last-day/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-08", "2026-11-08"),
+      [`${POINT}last-week/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-03", "2026-11-09"),
+    });
+    await expect(fetchNpmDays(stub.fetch, ["@pithy-sh/auth"], TODAY)).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  test("fails when last-week ends on last-day but is not seven days long", async () => {
+    const stub = stubFetch({
+      [`${POINT}last-day/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-08", "2026-11-08"),
+      [`${POINT}last-week/@pithy-sh/auth`]: point("@pithy-sh/auth", "2026-11-01", "2026-11-08"),
+    });
+    await expect(fetchNpmDays(stub.fetch, ["@pithy-sh/auth"], TODAY)).rejects.toBeInstanceOf(UpstreamError);
+  });
+
+  test("fails when last-day is the run's own day or later, which npm cannot have finished", async () => {
+    for (const day of [TODAY, "2026-11-11"]) {
+      const stub = stubFetch({
+        [`${POINT}last-day/@pithy-sh/auth`]: point("@pithy-sh/auth", day, day),
+        [`${POINT}last-week/@pithy-sh/auth`]: point("@pithy-sh/auth", addDays(day, -6), day),
+      });
+      await expect(fetchNpmDays(stub.fetch, ["@pithy-sh/auth"], TODAY)).rejects.toBeInstanceOf(UpstreamError);
+    }
+  });
+});
+
+describe("fetchNpmWeek", () => {
+  test("reads the window npm's last-week counts cover for one package", async () => {
+    const stub = stubFetch({
+      "https://api.npmjs.org/downloads/point/last-week/@pithy-sh/core": {
+        json: { downloads: 36, start: "2026-11-02", end: "2026-11-08", package: "@pithy-sh/core" },
+      },
+    });
+    expect(await fetchNpmWeek(stub.fetch, "@pithy-sh/core")).toEqual({ start: "2026-11-02", end: "2026-11-08" });
   });
 });

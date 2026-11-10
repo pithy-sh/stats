@@ -11,6 +11,8 @@ import {
   writeDependents,
   writeIssues,
   writeKitCount,
+  writeNpmDays,
+  writeNpmWeek,
   writePullRequests,
   writeRegistry,
   writeRepo,
@@ -78,6 +80,7 @@ describe("readPublishRows", () => {
       packages: [],
       dailyDownloads: [],
       versionDownloads: [],
+      npmDays: [],
       versionPublishes: [],
       registry: [],
       repo: null,
@@ -222,6 +225,25 @@ describe("readPublishRows", () => {
         codeLines: 20,
         countedAt: new Date("2026-11-09T02:01:00Z"),
       },
+    ]);
+  });
+
+  test("reads every day npm was asked which days it had counted, and the week confirmed for it", async () => {
+    await writeNpmDays(
+      db(),
+      { package: "@pithy-sh/core", lastDay: "2026-11-08", lastWeek: { start: "2026-11-02", end: "2026-11-08" } },
+      "2026-11-10",
+    );
+    await writeNpmWeek(db(), { start: "2026-11-02", end: "2026-11-08" }, "2026-11-10");
+    await writeNpmDays(
+      db(),
+      { package: "@pithy-sh/core", lastDay: "2026-11-07", lastWeek: { start: "2026-11-01", end: "2026-11-07" } },
+      "2026-11-09",
+    );
+    const rows = await readPublishRows(db(), REPO);
+    expect(rows.npmDays).toEqual([
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: null, weekEnd: null },
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
     ]);
   });
 });

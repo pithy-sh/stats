@@ -57,9 +57,23 @@ beforeAll(async () => {
 /** The kit's tarball, fresh on every request since a body is read once. */
 const tarball = (): StubAnswer => new Response(kitTarball as BodyInit, { status: 200 });
 
+/** The day before the one this test runs on: what npm names as its last complete day once that day has closed. */
+const yesterday = () => addDays(new Date().toISOString().slice(0, 10), -1);
+
+/** npm's `last-day` and `last-week` answers when the last day it has counted is `lastDay()`. */
+function npmPoints(lastDay: () => string = yesterday): Record<string, (call: StubCall) => StubAnswer> {
+  const point = (call: StubCall, start: string, end: string): StubAnswer => ({
+    json: { downloads: 36, start, end, package: call.url.split("/").slice(-2).join("/") },
+  });
+  return {
+    "https://api.npmjs.org/downloads/point/last-day/*": (call) => point(call, lastDay(), lastDay()),
+    "https://api.npmjs.org/downloads/point/last-week/*": (call) => point(call, addDays(lastDay(), -6), lastDay()),
+  };
+}
+
 /**
  * Every upstream the collector calls, answering a small, consistent kit. `downloads` sets a day's count, and `kit`
- * answers the tarball request.
+ * answers the tarball request. npm has counted every day before the one the test runs on.
  */
 function upstreams(
   downloads: (name: string, day: string) => number = () => 10,
@@ -153,6 +167,7 @@ function upstreams(
   };
 
   return stubFetch({
+    ...npmPoints(),
     "https://registry.npmjs.org/-/org/pithy-sh/package": {
       json: Object.fromEntries(PACKAGES.map((name) => [name, "write"])),
     },
@@ -269,6 +284,7 @@ async function rowCounts(): Promise<Record<string, number>> {
     "packages",
     "dailyDownloads",
     "versionDownloads",
+    "npmDays",
     "versionPublishes",
     "registrySnapshots",
     "registryLatest",
@@ -337,6 +353,7 @@ describe("a full run", () => {
       packages: 2,
       dailyDownloads: 6,
       versionDownloads: 4,
+      npmDays: 1,
       versionPublishes: 4,
       registrySnapshots: 2,
       registryLatest: 2,
@@ -760,9 +777,10 @@ describe("npm's rate limit", () => {
     await using instance = await introspectWorkflowInstance(env.COLLECT, "paced");
     await env.COLLECT.create({ id: "paced", params: { date: "2026-11-09" } });
     await instance.waitForStatus("complete");
-    // Four npm requests (two packages, two sources), each waiting out the gap after the one before it. The first
-    // waits too when an earlier test's request was the last to go, since time moves here only by sleeping.
-    expect(sleeps.length).toBeGreaterThanOrEqual(3);
+    // Six npm requests (the two that ask which days npm has counted, then two packages in two sources), each waiting
+    // out the gap after the one before it. The first waits too when an earlier test's request was the last to go,
+    // since time moves here only by sleeping.
+    expect(sleeps.length).toBeGreaterThanOrEqual(5);
     expect(sleeps.every((ms) => ms === NPM_API_GAP_MS)).toBe(true);
   });
 });
@@ -979,9 +997,16 @@ describe("a newly seen package", { timeout: 30_000 }, () => {
 
     // The window was decided in its own step, before any package's step ran, and is journalled there.
     expect(await instance.waitForStepResult({ name: DOWNLOAD_WINDOWS })).toEqual({
-      "@pithy-sh/auth": { start: "2026-11-06", end: "2026-11-08", history: false },
-      "@pithy-sh/core": { start: "2026-11-06", end: "2026-11-08", history: false },
-      [FRESH]: { start: npmHistoryStart(capturedOn), end: addDays(capturedOn, -1), history: true },
+      npm: {
+        package: PACKAGES[0],
+        lastDay: addDays(capturedOn, -1),
+        lastWeek: { start: addDays(capturedOn, -7), end: addDays(capturedOn, -1) },
+      },
+      windows: {
+        "@pithy-sh/auth": { start: "2026-11-06", end: "2026-11-08", history: false },
+        "@pithy-sh/core": { start: "2026-11-06", end: "2026-11-08", history: false },
+        [FRESH]: { start: npmHistoryStart(capturedOn), end: addDays(capturedOn, -1), history: true },
+      },
     });
     const days = await db().selectFrom("dailyDownloads").select("day").where("packageName", "=", FRESH).execute();
     expect(days[0]?.day).toBe(npmHistoryStart(capturedOn));
@@ -1044,16 +1069,199 @@ describe("a newly seen package", { timeout: 30_000 }, () => {
     expect(await markOf(FRESH)).toBe(lastSeenOn);
   });
 
-  test("when the windows cannot be read, every package fetches three days, none is marked, and the run names the step", async () => {
+  test("when the windows cannot be decided, no package fetches daily or version downloads, none is marked, and the run names all three", async () => {
     const stub = withFresh();
     const error = await run("no-windows", stub, {
       errored: true,
       modify: (m) => m.mockStepError({ name: DOWNLOAD_WINDOWS }, new Error("D1 is down")),
     });
-    expect(error).toContain(DOWNLOAD_WINDOWS);
-    for (const name of [...PACKAGES, FRESH]) {
-      expect(rangesOf(stub, name)).toEqual([`${RANGES}2026-11-06:2026-11-08/${name}`]);
-    }
+    expect(error).toContain(`${DOWNLOAD_WINDOWS}, version downloads, daily downloads`);
+    expect(stub.calls.filter((call) => call.url.startsWith(RANGES))).toEqual([]);
+    expect(stub.calls.filter((call) => call.url.startsWith("https://api.npmjs.org/versions/"))).toEqual([]);
     expect(await markOf(FRESH)).toBeNull();
+    expect(await count("versionDownloads")).toBe(0);
+  });
+});
+
+// Each test runs an instance end to end against a stubbed npm that has not yet counted the day before the run.
+describe("npm's last complete day", { timeout: 30_000 }, () => {
+  const RANGES = "https://api.npmjs.org/downloads/range/";
+  const POINTS = "https://api.npmjs.org/downloads/point/";
+  const VERSIONS = "https://api.npmjs.org/versions/";
+  /** Two days before the day the test runs on: npm has not finished counting yesterday. */
+  const twoDaysBack = () => addDays(new Date().toISOString().slice(0, 10), -2);
+
+  /** `upstreams()`, with npm's last complete day two days back and a count of 0 for any later day, as npm answers. */
+  function lagging(): ReturnType<typeof stubFetch> {
+    return upstreamsWith({
+      ...npmPoints(twoDaysBack),
+      [`${RANGES}*`]: (call) => {
+        const [start = "", end = ""] = (call.url.slice(RANGES.length).split("/")[0] ?? "").split(":");
+        const days: { day: string; downloads: number }[] = [];
+        for (let day = start; day <= end; day = addDays(day, 1)) {
+          days.push({ day, downloads: day > twoDaysBack() ? 0 : 10 });
+        }
+        return { json: { downloads: days } };
+      },
+    });
+  }
+
+  test("a run before npm has counted yesterday neither stores nor publishes a row for it", async () => {
+    const stub = lagging();
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "lagging");
+    await env.COLLECT.create({ id: "lagging", params: {} });
+    await instance.waitForStatus("complete");
+    const { capturedOn } = (await instance.getOutput()) as { capturedOn: string };
+    const lastDay = addDays(capturedOn, -2);
+
+    // Asked once per run, for one package, before any package's version or daily downloads, through the paced client;
+    // last-week is asked again once every package's per-version counts are in, before any daily downloads.
+    const points = stub.calls.filter((call) => call.url.startsWith(POINTS)).map((call) => call.url);
+    expect(points).toEqual([
+      `${POINTS}last-day/${PACKAGES[0]}`,
+      `${POINTS}last-week/${PACKAGES[0]}`,
+      `${POINTS}last-week/${PACKAGES[0]}`,
+    ]);
+    const urls = stub.calls.map((call) => call.url);
+    const firstVersions = urls.findIndex((url) => url.startsWith(VERSIONS));
+    const lastVersions = urls.length - 1 - [...urls].reverse().findIndex((url) => url.startsWith(VERSIONS));
+    expect(urls.indexOf(`${POINTS}last-week/${PACKAGES[0]}`)).toBeLessThan(firstVersions);
+    expect(urls.lastIndexOf(`${POINTS}last-week/${PACKAGES[0]}`)).toBeGreaterThan(lastVersions);
+    expect(urls.lastIndexOf(`${POINTS}last-week/${PACKAGES[0]}`)).toBeLessThan(
+      urls.findIndex((url) => url.startsWith(RANGES)),
+    );
+
+    // Every window ends at npm's last complete day and still overwrites three days.
+    for (const name of PACKAGES) {
+      expect(stub.calls.filter((call) => call.url.startsWith(RANGES) && call.url.endsWith(`/${name}`))).toEqual([
+        expect.objectContaining({ url: `${RANGES}${addDays(lastDay, -2)}:${lastDay}/${name}` }),
+      ]);
+    }
+    const days = await db().selectFrom("dailyDownloads").select("day").distinct().orderBy("day").execute();
+    expect(days.map((row) => row.day)).toEqual([addDays(lastDay, -2), addDays(lastDay, -1), lastDay]);
+    expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([
+      { capturedOn, lastDay, weekStart: addDays(lastDay, -6), weekEnd: lastDay },
+    ]);
+
+    const latest = Latest.parse(await published(currentKey("latest")));
+    const summary = Summary.parse(await published(currentKey("summary")));
+    expect(latest.asOf).toBe(lastDay);
+    expect(latest.downloads.end).toBe(lastDay);
+    expect(latest.downloads.kit?.at(-1)).toBe(20);
+    for (const row of latest.packages) expect(row.daily?.at(-1)).toBe(10);
+    expect(summary.asOf).toBe(lastDay);
+    expect(summary.downloads).toMatchObject({ allTime: 60, last7: 60, prior7: 0, last30: 60 });
+    // The per-version counts captured today are dated by npm's last-week window, not by the capture day.
+    for (const row of latest.packages) {
+      expect(row.versionWeeks).toEqual([
+        { start: addDays(lastDay, -6), end: lastDay, counts: { "0.1.0": 3, "0.2.0": 30 } },
+      ]);
+    }
+  });
+
+  test("a zero row stored before for a day npm has not counted is never asOf, and is overwritten once npm counts it", async () => {
+    const pending = addDays(new Date().toISOString().slice(0, 10), -1);
+    for (const name of PACKAGES) await writeDailyDownloads(db(), name, [{ day: pending, downloads: 0 }], KNOWN_SINCE);
+
+    stubUpstreams(lagging());
+    {
+      await using instance = await introspectWorkflowInstance(env.COLLECT, "zero-row-early");
+      await env.COLLECT.create({ id: "zero-row-early", params: {} });
+      await instance.waitForStatus("complete");
+    }
+    const early = Latest.parse(await published(currentKey("latest")));
+    expect(early.asOf).toBe(twoDaysBack());
+    expect(early.downloads.end).toBe(twoDaysBack());
+
+    vi.restoreAllMocks();
+    stubUpstreams(upstreams(() => 7));
+    {
+      await using instance = await introspectWorkflowInstance(env.COLLECT, "zero-row-counted");
+      await env.COLLECT.create({ id: "zero-row-counted", params: {} });
+      await instance.waitForStatus("complete");
+    }
+    const counted = Latest.parse(await published(currentKey("latest")));
+    expect(counted.asOf).toBe(pending);
+    expect(counted.downloads.kit?.at(-1)).toBe(14);
+  });
+
+  test("a probe npm cannot answer is retried, then fails the windows step: nothing uncounted is fetched", async () => {
+    // A capture from before npm was asked: it has no week, so it is never published under one derived from its day.
+    for (const name of PACKAGES) await writeVersionDownloads(db(), name, { "0.1.0": 5 }, addDays(today(), -3));
+    const stub = upstreamsWith({ [`${POINTS}*`]: { status: 503 } });
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "no-probe");
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+    });
+    await env.COLLECT.create({ id: "no-probe", params: {} });
+    await instance.waitForStatus("errored");
+
+    expect((await instance.getError()).message).toContain(DOWNLOAD_WINDOWS);
+    expect(stub.calls.filter((call) => call.url.startsWith(RANGES))).toEqual([]);
+    expect(stub.calls.filter((call) => call.url.startsWith(VERSIONS))).toEqual([]);
+    expect(stub.calls.filter((call) => call.url.startsWith(POINTS)).length).toBeGreaterThan(1);
+    expect(await count("npmDays")).toBe(0);
+    expect(await count("versionDownloads")).toBe(PACKAGES.length);
+    const latest = Latest.parse(await published(currentKey("latest")));
+    for (const row of latest.packages) expect(row.versionWeeks).toEqual([]);
+  });
+
+  test("npm closing a day between the probe and the per-version counts leaves today's counts undated and unpublished", async () => {
+    // npm's last-week ends two days back until the first per-version request, then yesterday: a day closed mid-run.
+    let rolled = false;
+    const lastDay = () => (rolled ? yesterday() : twoDaysBack());
+    const stub = upstreamsWith({
+      ...npmPoints(lastDay),
+      [`${VERSIONS}*`]: () => {
+        rolled = true;
+        return { status: 599 };
+      },
+    });
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "rolled");
+    await env.COLLECT.create({ id: "rolled", params: {} });
+    await instance.waitForStatus("complete");
+    const { capturedOn } = (await instance.getOutput()) as { capturedOn: string };
+
+    expect(await count("versionDownloads")).toBe(2 * PACKAGES.length);
+    expect(await db().selectFrom("npmDays").selectAll().execute()).toEqual([
+      { capturedOn, lastDay: addDays(capturedOn, -2), weekStart: null, weekEnd: null },
+    ]);
+    const latest = Latest.parse(await published(currentKey("latest")));
+    expect(latest.asOf).toBe(addDays(capturedOn, -2));
+    for (const row of latest.packages) expect(row.versionWeeks).toEqual([]);
+  });
+
+  test("a lag longer than the overwrite is caught up by the first run after npm recovers", async () => {
+    const fiveBack = () => addDays(today(), -6);
+    vi.restoreAllMocks();
+    stubUpstreams(upstreamsWith(npmPoints(fiveBack)));
+    {
+      await using instance = await introspectWorkflowInstance(env.COLLECT, "lag-five");
+      await env.COLLECT.create({ id: "lag-five", params: {} });
+      await instance.waitForStatus("complete");
+    }
+    const lagged = await db().selectFrom("dailyDownloads").select("day").distinct().orderBy("day").execute();
+    expect(lagged.map((row) => row.day)).toEqual([-8, -7, -6].map((back) => addDays(today(), back)));
+
+    vi.restoreAllMocks();
+    const recovered = upstreams();
+    stubUpstreams(recovered);
+    {
+      await using instance = await introspectWorkflowInstance(env.COLLECT, "lag-recovered");
+      await env.COLLECT.create({ id: "lag-recovered", params: {} });
+      await instance.waitForStatus("complete");
+    }
+    for (const name of PACKAGES) {
+      expect(recovered.calls.filter((call) => call.url.startsWith(RANGES) && call.url.endsWith(`/${name}`))).toEqual([
+        expect.objectContaining({ url: `${RANGES}${addDays(today(), -5)}:${yesterday()}/${name}` }),
+      ]);
+    }
+    const days = await db().selectFrom("dailyDownloads").select("day").distinct().orderBy("day").execute();
+    expect(days.map((row) => row.day)).toEqual([-8, -7, -6, -5, -4, -3, -2, -1].map((back) => addDays(today(), back)));
+    const latest = Latest.parse(await published(currentKey("latest")));
+    expect(latest.asOf).toBe(yesterday());
   });
 });

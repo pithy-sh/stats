@@ -51,6 +51,7 @@ function rows(): PublishRows {
       { packageName: "@pithy-sh/core", version: "0.1.0", capturedOn: "2026-11-09", downloads: 3 },
       { packageName: "@pithy-sh/core", version: "0.2.0", capturedOn: "2026-11-09", downloads: 30 },
     ],
+    npmDays: [{ capturedOn: "2026-11-09", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" }],
     versionPublishes: [
       { packageName: "@pithy-sh/core", version: "0.2.0", publishedAt: at("2026-11-05T10:00:00Z") },
       { packageName: "@pithy-sh/core", version: "0.1.0", publishedAt: at("2026-11-02T10:00:00Z") },
@@ -161,6 +162,7 @@ const empty: PublishRows = {
   packages: [],
   dailyDownloads: [],
   versionDownloads: [],
+  npmDays: [],
   versionPublishes: [],
   registry: [],
   repo: null,
@@ -356,6 +358,113 @@ describe("buildLatest", () => {
     expect(latest.downloads).toEqual({ start: null, end: null, kit: null });
     expect(latest.packages[0]?.daily).toBeNull();
     expect(latest.packages[0]?.jsdelivr).toBeNull();
+  });
+});
+
+describe("only days npm has counted", () => {
+  /** A run before npm closed 2026-11-08: npm answered 0 for it, and said its last complete day was 2026-11-07. */
+  function early(): PublishRows {
+    const input = rows();
+    input.dailyDownloads = [
+      ...input.dailyDownloads.filter((row) => row.day !== "2026-11-08"),
+      { packageName: "@pithy-sh/core", day: "2026-11-08", downloads: 0 },
+      { packageName: "@pithy-sh/auth", day: "2026-11-08", downloads: 0 },
+    ];
+    input.npmDays = [
+      { capturedOn: "2026-11-08", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
+    ];
+    return input;
+  }
+
+  test("a day after npm's last complete day is never asOf, and never reaches a series", () => {
+    const latest = buildLatest(early(), { repo: REPO }, NOW);
+    expect(latest.asOf).toBe("2026-11-07");
+    expect(latest.downloads).toEqual({ start: "2026-11-02", end: "2026-11-07", kit: [1, 2, 3, 4, 5, 6] });
+    expect(latest.packages.find((row) => row.name === "@pithy-sh/core")?.daily).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  test("summary windows end at npm's last complete day", () => {
+    const input = early();
+    expect(buildSummary(input, buildLatest(input, { repo: REPO }, NOW))).toMatchObject({
+      asOf: "2026-11-07",
+      downloads: { allTime: 21, last30: 21, prior30: 0, last7: 21, prior7: 0 },
+    });
+  });
+
+  test("asOf follows npm's newest answer, not the furthest day it ever named", () => {
+    const input = rows();
+    input.npmDays = [
+      { capturedOn: "2026-11-08", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
+    ];
+    expect(buildLatest(input, { repo: REPO }, NOW).asOf).toBe("2026-11-07");
+  });
+
+  test("asOf is the newest day held when npm has counted further than the run wrote", () => {
+    const input = rows();
+    input.npmDays = [
+      { capturedOn: "2026-11-10", lastDay: "2026-11-09", weekStart: "2026-11-03", weekEnd: "2026-11-09" },
+    ];
+    const latest = buildLatest(input, { repo: REPO }, NOW);
+    expect(latest.asOf).toBe("2026-11-08");
+    expect(latest.downloads.end).toBe("2026-11-08");
+  });
+
+  test("with no download held, asOf is npm's last complete day when it is known", () => {
+    expect(
+      buildLatest(
+        {
+          ...empty,
+          npmDays: [
+            { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
+          ],
+        },
+        { repo: REPO },
+        NOW,
+      ).asOf,
+    ).toBe("2026-11-07");
+  });
+
+  test("versionWeeks carry npm's last-week window, not one derived from the capture day", () => {
+    const input = rows();
+    input.versionDownloads = [
+      { packageName: "@pithy-sh/core", version: "0.1.0", capturedOn: "2026-11-10", downloads: 1730 },
+    ];
+    input.npmDays = [
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
+    ];
+    const core = buildLatest(input, { repo: REPO }, NOW).packages.find((row) => row.name === "@pithy-sh/core");
+    expect(core?.versionWeeks).toEqual([{ start: "2026-11-02", end: "2026-11-08", counts: { "0.1.0": 1730 } }]);
+  });
+
+  test("a capture from before npm was asked is left out, and the npm-dated one beside it is kept as npm dated it", () => {
+    const input = rows();
+    input.versionDownloads = [
+      { packageName: "@pithy-sh/core", version: "0.1.0", capturedOn: "2026-11-02", downloads: 700 },
+      { packageName: "@pithy-sh/core", version: "0.1.0", capturedOn: "2026-11-10", downloads: 1730 },
+    ];
+    input.npmDays = [
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: "2026-11-02", weekEnd: "2026-11-08" },
+    ];
+    const core = buildLatest(input, { repo: REPO }, NOW).packages.find((row) => row.name === "@pithy-sh/core");
+    expect(core?.versionWeeks).toEqual([{ start: "2026-11-02", end: "2026-11-08", counts: { "0.1.0": 1730 } }]);
+  });
+
+  test("a capture whose week was never confirmed is not published, and the dated one before it still is", () => {
+    const input = rows();
+    input.versionDownloads = [
+      { packageName: "@pithy-sh/core", version: "0.1.0", capturedOn: "2026-11-09", downloads: 1500 },
+      { packageName: "@pithy-sh/core", version: "0.1.0", capturedOn: "2026-11-10", downloads: 1730 },
+    ];
+    input.npmDays = [
+      { capturedOn: "2026-11-09", lastDay: "2026-11-07", weekStart: "2026-11-01", weekEnd: "2026-11-07" },
+      { capturedOn: "2026-11-10", lastDay: "2026-11-08", weekStart: null, weekEnd: null },
+    ];
+    const latest = buildLatest(input, { repo: REPO }, NOW);
+    expect(latest.asOf).toBe("2026-11-08");
+    const core = latest.packages.find((row) => row.name === "@pithy-sh/core");
+    expect(core?.versionWeeks).toEqual([{ start: "2026-11-01", end: "2026-11-07", counts: { "0.1.0": 1500 } }]);
   });
 });
 

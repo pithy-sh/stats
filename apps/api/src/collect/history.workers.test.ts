@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { statsDatabase } from "../data/tables";
 import { freshDatabase } from "../data/testing";
 import { markHistoryCollected, readHistoryState } from "./history";
-import { recordPackages, writeRegistry } from "./store";
+import { recordPackages, writeDailyDownloads, writeRegistry } from "./store";
 import type { RegistryFacts } from "./upstream/npm";
 
 const db = () => statsDatabase(env.DB);
@@ -28,7 +28,7 @@ describe("readHistoryState", () => {
     await recordPackages(db(), ["@pithy-sh/core"], "2026-11-09");
     await writeRegistry(db(), "@pithy-sh/core", facts(new Date("2026-09-05T23:30:00-02:00")), "2026-11-09");
     expect(await readHistoryState(db(), ["@pithy-sh/core"])).toEqual({
-      "@pithy-sh/core": { pending: true, createdOn: "2026-09-06" },
+      "@pithy-sh/core": { pending: true, createdOn: "2026-09-06", newestDay: null },
     });
   });
 
@@ -36,8 +36,8 @@ describe("readHistoryState", () => {
     await recordPackages(db(), ["@pithy-sh/a", "@pithy-sh/b"], "2026-11-09");
     await writeRegistry(db(), "@pithy-sh/b", facts(null), "2026-11-09");
     expect(await readHistoryState(db(), ["@pithy-sh/a", "@pithy-sh/b"])).toEqual({
-      "@pithy-sh/a": { pending: true, createdOn: null },
-      "@pithy-sh/b": { pending: true, createdOn: null },
+      "@pithy-sh/a": { pending: true, createdOn: null, newestDay: null },
+      "@pithy-sh/b": { pending: true, createdOn: null, newestDay: null },
     });
   });
 
@@ -45,14 +45,28 @@ describe("readHistoryState", () => {
     await recordPackages(db(), ["@pithy-sh/core", "@pithy-sh/auth", "@pithy-sh/gone"], "2026-11-09");
     await markHistoryCollected(db(), "@pithy-sh/core", "2026-11-09");
     expect(await readHistoryState(db(), ["@pithy-sh/core", "@pithy-sh/auth"])).toEqual({
-      "@pithy-sh/core": { pending: false, createdOn: null },
-      "@pithy-sh/auth": { pending: true, createdOn: null },
+      "@pithy-sh/core": { pending: false, createdOn: null, newestDay: null },
+      "@pithy-sh/auth": { pending: true, createdOn: null, newestDay: null },
+    });
+  });
+
+  test("answers the newest day a daily-downloads row is held for, per package", async () => {
+    await recordPackages(db(), ["@pithy-sh/core", "@pithy-sh/auth"], "2026-11-09");
+    await writeDailyDownloads(
+      db(),
+      "@pithy-sh/core",
+      ["2026-11-01", "2026-11-03", "2026-11-02"].map((day) => ({ day, downloads: 1 })),
+      "2026-11-09",
+    );
+    expect(await readHistoryState(db(), ["@pithy-sh/core", "@pithy-sh/auth"])).toEqual({
+      "@pithy-sh/core": { pending: true, createdOn: null, newestDay: "2026-11-03" },
+      "@pithy-sh/auth": { pending: true, createdOn: null, newestDay: null },
     });
   });
 
   test("a name with no package row is pending", async () => {
     expect(await readHistoryState(db(), ["@pithy-sh/unknown"])).toEqual({
-      "@pithy-sh/unknown": { pending: true, createdOn: null },
+      "@pithy-sh/unknown": { pending: true, createdOn: null, newestDay: null },
     });
   });
 });

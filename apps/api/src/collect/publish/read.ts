@@ -6,6 +6,7 @@ import {
   DependentSnapshot,
   Issue,
   KitCount,
+  NpmCountedDays,
   PullRequest,
   RegistrySnapshot,
   RepoSnapshot,
@@ -51,6 +52,7 @@ export async function readPublishRows(db: StatsDatabase, repo: string): Promise<
     versionDownloads: current(
       decodeAll(VersionDownload, await db.selectFrom("versionDownloads").selectAll().execute()),
     ),
+    npmDays: decodeAll(NpmCountedDays, await db.selectFrom("npmDays").selectAll().orderBy("capturedOn").execute()),
     versionPublishes: current(decodeAll(VersionPublish, await db.selectFrom("versionPublishes").selectAll().execute())),
     registry: current(decodeAll(RegistrySnapshot, await db.selectFrom("registryLatest").selectAll().execute())),
     repo: repoRow === undefined ? null : RepoSnapshot.decode(repoRow as z.input<typeof RepoSnapshot>),

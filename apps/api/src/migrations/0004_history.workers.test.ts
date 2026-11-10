@@ -11,6 +11,14 @@ async function columns(table: string): Promise<string[]> {
   return rows.rows.map((row) => row.name);
 }
 
+/** Roll back to the schema before 0004: every later migration comes down first. */
+async function rollbackHistory(): Promise<void> {
+  for (;;) {
+    const results = await rollbackMigration(env.DB, statsMigrationProvider());
+    if (results.length === 0 || results.some((result) => result.migrationName.endsWith("0004_history"))) return;
+  }
+}
+
 beforeEach(async () => {
   await freshDatabase(env.DB);
 });
@@ -28,7 +36,7 @@ describe("0004_history", () => {
   });
 
   test("up leaves every package already recorded uncollected, so the next run fetches its whole history", async () => {
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackHistory();
     expect(await columns("packages")).not.toContain("history_collected_on");
     await env.DB.prepare(
       "insert into packages (name, first_seen_on, last_seen_on) values ('@pithy-sh/core', '2026-09-05', '2026-11-08'), ('@pithy-sh/auth', '2026-10-01', '2026-11-08')",
@@ -47,14 +55,14 @@ describe("0004_history", () => {
     await env.DB.prepare(
       "insert into packages (name, first_seen_on, last_seen_on) values ('@pithy-sh/core', '2026-09-05', '2026-11-08')",
     ).run();
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackHistory();
     expect(await columns("packages")).toEqual(["name", "first_seen_on", "last_seen_on"]);
     const { results } = await env.DB.prepare("select name from packages").all<{ name: string }>();
     expect(results).toEqual([{ name: "@pithy-sh/core" }]);
   });
 
   test("up again after down restores it", async () => {
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackHistory();
     await runMigrations(env.DB, statsMigrationProvider());
     expect(await columns("packages")).toContain("history_collected_on");
   });

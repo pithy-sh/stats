@@ -14,6 +14,7 @@ import type {
   DependentSnapshot,
   Issue,
   KitCount,
+  NpmCountedDays,
   PullRequest,
   RegistrySnapshot,
   RepoSnapshot,
@@ -39,6 +40,8 @@ export interface PublishRows {
   packages: readonly string[];
   dailyDownloads: readonly Pick<DailyDownload, "packageName" | "day" | "downloads">[];
   versionDownloads: readonly VersionDownload[];
+  /** Which days npm had counted, one row per day it was asked. */
+  npmDays: readonly NpmCountedDays[];
   versionPublishes: readonly VersionPublish[];
   /** The newest registry row per package. */
   registry: readonly RegistrySnapshot[];
@@ -223,6 +226,13 @@ function cdnHits(rows: PublishRows): (name: string) => number | null {
 function packageFigures(rows: PublishRows, span: DayRange | null): PackageStats[] {
   const registry = new Map(rows.registry.map((row) => [row.packageName, row]));
   const jsdelivr = cdnHits(rows);
+  const weeks = new Map(
+    rows.npmDays.flatMap((row) =>
+      row.weekStart === null || row.weekEnd === null
+        ? []
+        : [[row.capturedOn, { start: row.weekStart, end: row.weekEnd }] as const],
+    ),
+  );
   return [...rows.packages].sort().map((name) => {
     const facts = registry.get(name);
     const versions = rows.versionPublishes
@@ -243,7 +253,10 @@ function packageFigures(rows: PublishRows, span: DayRange | null): PackageStats[
               rows.dailyDownloads.filter((row) => row.packageName === name),
             ),
       versions: versions.map((row) => ({ version: row.version, publishedAt: iso(row.publishedAt) })),
-      versionWeeks: versionWindows(rows.versionDownloads.filter((row) => row.packageName === name)),
+      versionWeeks: versionWindows(
+        rows.versionDownloads.filter((row) => row.packageName === name),
+        weeks,
+      ),
       footprint:
         facts === undefined
           ? null
@@ -288,11 +301,26 @@ function kitFigures(counts: readonly KitCount[]): Latest["kit"] {
   };
 }
 
-/** The last complete day of npm downloads held, or the day before `now` when none is. */
+/** The newest day npm had finished counting, as it answered on the newest day it was asked; null before it was. */
+function npmLastDay(npmDays: readonly NpmCountedDays[]): Day | null {
+  const newest = npmDays.reduce<NpmCountedDays | null>(
+    (latest, row) => (latest === null || row.capturedOn > latest.capturedOn ? row : latest),
+    null,
+  );
+  return newest?.lastDay ?? null;
+}
+
+/**
+ * The last complete day of npm downloads held: the newest day held, no later than npm's last complete day, so a row
+ * stored for a day npm had not finished counting is never one. With none held, the day before `now`, no later than
+ * npm's last complete day either.
+ */
 function asOfDay(rows: PublishRows, now: Date): Day {
-  const days = rows.dailyDownloads.map((row) => row.day);
-  if (days.length === 0) return addDays(utcDay(now), -1);
-  return days.reduce((newest, day) => (day > newest ? day : newest));
+  const counted = npmLastDay(rows.npmDays);
+  const days = rows.dailyDownloads.map((row) => row.day).filter((day) => counted === null || day <= counted);
+  const newest =
+    days.length === 0 ? addDays(utcDay(now), -1) : days.reduce((latest, day) => (day > latest ? day : latest));
+  return counted !== null && counted < newest ? counted : newest;
 }
 
 /** `latest.json`: everything the `/stats/` page draws, from the rows D1 holds, as of `now`. */

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { addDays } from "../day";
 import {
   dailySeries,
   mean,
@@ -103,13 +104,73 @@ describe("versionWindows", () => {
       { version: "0.1.0", capturedOn: "2026-11-02", downloads: 2 },
       { version: "0.1.0", capturedOn: "2026-11-01", downloads: 1 },
     ];
-    expect(versionWindows(rows)).toEqual([
+    const weekEnding = (end: string) => ({ start: addDays(end, -6), end });
+    const weeks = new Map([
+      ["2026-11-09", weekEnding("2026-11-08")],
+      ["2026-11-08", weekEnding("2026-11-07")],
+      ["2026-11-02", weekEnding("2026-11-01")],
+      ["2026-11-01", weekEnding("2026-10-31")],
+    ]);
+    expect(versionWindows(rows, weeks)).toEqual([
       { start: "2026-10-26", end: "2026-11-01", counts: { "0.1.0": 2 } },
       { start: "2026-11-02", end: "2026-11-08", counts: { "0.1.0": 9, "0.2.0": 90 } },
     ]);
   });
 
+  test("dates a capture by the week npm said its counts covered, not by the capture day", () => {
+    const rows = [
+      { version: "0.1.0", capturedOn: "2026-11-10", downloads: 1730 },
+      { version: "0.1.0", capturedOn: "2026-11-03", downloads: 900 },
+    ];
+    const weeks = new Map([
+      ["2026-11-10", { start: "2026-11-02", end: "2026-11-08" }],
+      ["2026-11-03", { start: "2026-10-26", end: "2026-11-01" }],
+    ]);
+    expect(versionWindows(rows, weeks)).toEqual([
+      { start: "2026-10-26", end: "2026-11-01", counts: { "0.1.0": 900 } },
+      { start: "2026-11-02", end: "2026-11-08", counts: { "0.1.0": 1730 } },
+    ]);
+  });
+
+  test("keeps windows apart by npm's weeks: a capture whose week overlaps a newer one's is dropped", () => {
+    const rows = [
+      { version: "0.1.0", capturedOn: "2026-11-10", downloads: 10 },
+      { version: "0.1.0", capturedOn: "2026-11-09", downloads: 9 },
+      { version: "0.1.0", capturedOn: "2026-11-02", downloads: 2 },
+    ];
+    const weeks = new Map([
+      ["2026-11-10", { start: "2026-11-02", end: "2026-11-08" }],
+      ["2026-11-09", { start: "2026-11-01", end: "2026-11-07" }],
+      ["2026-11-02", { start: "2026-10-25", end: "2026-10-31" }],
+    ]);
+    expect(versionWindows(rows, weeks)).toEqual([
+      { start: "2026-10-25", end: "2026-10-31", counts: { "0.1.0": 2 } },
+      { start: "2026-11-02", end: "2026-11-08", counts: { "0.1.0": 10 } },
+    ]);
+  });
+
+  test("leaves out a capture with no week, and never dates one by its capture day", () => {
+    const rows = [
+      { version: "0.1.0", capturedOn: "2026-11-10", downloads: 10 },
+      { version: "0.1.0", capturedOn: "2026-11-03", downloads: 3 },
+    ];
+    expect(versionWindows(rows, new Map([["2026-11-03", { start: "2026-10-26", end: "2026-11-01" }]]))).toEqual([
+      { start: "2026-10-26", end: "2026-11-01", counts: { "0.1.0": 3 } },
+    ]);
+    expect(versionWindows(rows, new Map())).toEqual([]);
+  });
+
+  test("an undated newer capture does not push out an older dated one", () => {
+    const rows = [
+      { version: "0.1.0", capturedOn: "2026-11-10", downloads: 10 },
+      { version: "0.1.0", capturedOn: "2026-11-09", downloads: 9 },
+    ];
+    expect(versionWindows(rows, new Map([["2026-11-09", { start: "2026-11-01", end: "2026-11-07" }]]))).toEqual([
+      { start: "2026-11-01", end: "2026-11-07", counts: { "0.1.0": 9 } },
+    ]);
+  });
+
   test("is empty with nothing held", () => {
-    expect(versionWindows([])).toEqual([]);
+    expect(versionWindows([], new Map())).toEqual([]);
   });
 });

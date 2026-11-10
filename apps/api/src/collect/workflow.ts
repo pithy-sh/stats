@@ -1,5 +1,5 @@
 import type { WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
-import { UpstreamError } from "@pithy-sh/core/src/error/pithyError";
+import { InternalError, UpstreamError } from "@pithy-sh/core/src/error/pithyError";
 import type { Logger } from "@pithy-sh/core/src/logger/logger";
 import { createWorkerLogger } from "@pithy-sh/core/src/logger/worker";
 import type { WorkflowSpecMap } from "@pithy-sh/core/src/workflow/spec";
@@ -22,6 +22,8 @@ import {
   writeDependents,
   writeIssues,
   writeKitCount,
+  writeNpmDays,
+  writeNpmWeek,
   writePullRequests,
   writeRegistry,
   writeRepo,
@@ -40,8 +42,16 @@ import {
 } from "./upstream/github";
 import { type Fetcher, runtimeFetch } from "./upstream/http";
 import { fetchCdnStats } from "./upstream/jsdelivr";
-import { fetchDailyDownloads, fetchOrgPackages, fetchRegistry, fetchVersionDownloads } from "./upstream/npm";
-import { type DownloadWindow, downloadWindowFor } from "./window";
+import {
+  fetchDailyDownloads,
+  fetchNpmDays,
+  fetchNpmWeek,
+  fetchOrgPackages,
+  fetchRegistry,
+  fetchVersionDownloads,
+  NpmDays,
+} from "./upstream/npm";
+import { DownloadWindow, downloadWindowFor } from "./window";
 
 /** The npm org whose packages are counted. */
 export const KIT_ORG = "pithy-sh";
@@ -54,7 +64,10 @@ export const FIRST_PUBLISH_DAY: Day = "2026-09-05";
 
 /** The binding the collector Workflow is reached by. */
 export const COLLECT_BINDING = "COLLECT";
-/** Every day at 02:00 UTC, once npm has finished counting the day before. */
+/**
+ * Every day at 02:00 UTC. npm may still be counting the day before by then, so each run asks npm which day it has
+ * last finished instead of assuming it.
+ */
 export const COLLECT_CRON = "0 2 * * *";
 
 export const CollectJob = z
@@ -120,20 +133,34 @@ export const PUBLISH_STEP = {
 } as const satisfies WorkflowStepConfig;
 
 /**
- * The step that decides each package's daily-downloads window, once the registry has run and before any package's
- * daily-downloads step. Its journalled answer is what every one of those steps fetches, on a replay as on the first
- * run.
+ * The step that asks npm which days it has counted and decides each package's daily-downloads window, once the
+ * registry has run and before any package's version-downloads or daily-downloads step. It records npm's last complete
+ * day and ends every window there. Its journalled answer is what every one of those steps fetches, and the week the
+ * version-downloads source checks its counts against, on a replay as on the first run.
  */
 export const DOWNLOAD_WINDOWS = "download windows";
 
-/** The download-windows step: a retry reads the same rows again. */
+/**
+ * The download-windows step: a retry asks npm again and reads the same rows again. Its two npm requests are paced and
+ * a rate limit is waited out in place, which can take most of a minute, so it gets the time a subject step does.
+ */
 export const DOWNLOAD_WINDOWS_STEP = {
   retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
-  timeout: "1 minute",
+  timeout: "10 minutes",
 } as const satisfies WorkflowStepConfig;
 
 /** The publish step's name. It runs once every source step has finished, whether or not each succeeded. */
 export const PUBLISH = "publish";
+
+export const WindowPlan = z
+  .object({
+    npm: NpmDays.describe("Which days npm said it had counted."),
+    windows: z
+      .record(z.string().describe("A package name."), DownloadWindow)
+      .describe("Each package's daily-downloads window."),
+  })
+  .describe("What the download-windows step decided: npm's answer, and every package's window from it.");
+export type WindowPlan = z.output<typeof WindowPlan>;
 
 /**
  * Each source's name: its step's, or for a source that runs per subject, the prefix of each subject's step and the
@@ -152,7 +179,9 @@ export const STEPS = {
 
 export const CollectReport = z
   .object({
-    day: Day.describe("The UTC day the run was for: its daily downloads end the day before."),
+    day: Day.describe(
+      "The UTC day the run was for: its daily downloads end the day before, or at npm's last complete day when that is earlier.",
+    ),
     capturedOn: Day.describe("The UTC day the run fetched on, which every row it wrote is stamped with."),
     packages: z.number().int().nonnegative().describe("Packages in the org's list."),
     rows: z
@@ -189,11 +218,17 @@ type SourceKey = Exclude<keyof typeof STEPS, "packages">;
 /**
  * One source's work, each part answering the rows it wrote. `whole` runs as one step named for the source, which
  * records the source complete. `each` runs one step per subject, named `<source> <subject>`, and then a step named
- * for the source that records it complete once every subject has written.
+ * for the source that runs `finish`, if any, and records it complete once every subject has written.
  */
 type SourceWork =
   | { whole: () => Promise<number> }
-  | { each: ReadonlyArray<readonly [subject: string, run: () => Promise<number>]> };
+  | {
+      each: ReadonlyArray<readonly [subject: string, run: () => Promise<number>]>;
+      finish?: () => Promise<void>;
+    };
+
+/** The sources that wait for the download-windows step, and are skipped when it fails. */
+const NEEDS_PLAN: ReadonlySet<SourceKey> = new Set(["versionDownloads", "dailyDownloads"]);
 
 /** The subject of deps.dev's one step that is not a package: the repository's Scorecard. */
 export const SCORECARD_SUBJECT = "scorecard";
@@ -204,31 +239,65 @@ function backfillFrom(job: CollectJob): Day | undefined {
 }
 
 /**
- * Each package's daily-downloads window for this run, from its history state: the whole history for a package no
- * step has yet collected in full, the usual window for the rest.
+ * Each package's daily-downloads window for this run: npm is asked, through `fetcher`, which days it has counted, and
+ * its last complete day is recorded under `today`, with no week until the version-downloads source confirms one. Then
+ * each package gets the whole history if no step has yet collected it in full, the usual window otherwise, caught up
+ * from the newest day held, every one ending no later than npm's last complete day.
  */
 async function planWindows(
   db: StatsDatabase,
+  fetcher: Fetcher,
   packages: readonly string[],
   day: Day,
   today: Day,
   job: CollectJob,
-): Promise<Record<string, DownloadWindow>> {
+): Promise<WindowPlan> {
+  const npm = await fetchNpmDays(fetcher, packages, today);
+  await writeNpmDays(db, npm, today);
   const states = await readHistoryState(db, packages);
-  return Object.fromEntries(
+  const windows = Object.fromEntries(
     packages.map((name) => {
-      const state = states[name] ?? { pending: false, createdOn: null };
-      return [name, downloadWindowFor({ day, today, backfillFrom: backfillFrom(job), ...state })];
+      const state = states[name] ?? { pending: false, createdOn: null, newestDay: null };
+      return [
+        name,
+        downloadWindowFor({ day, today, backfillFrom: backfillFrom(job), completeThrough: npm.lastDay, ...state }),
+      ];
     }),
   );
+  return { npm, windows };
 }
 
 /**
- * Each source as units of work: fetch, then write. A source that loops over packages does one step per package, so
- * a package that fails does not redo the ones that wrote. Only daily downloads read `day`, because only they come
- * from a dated historical API, and each package's window comes from `windowOf`, decided before its step runs; a
- * step that fetched a package's whole history marks it collected. Everything is stamped with `today`, the day it was
- * fetched. The kit's count records `now()` as when it was taken.
+ * Date today's per-version counts, once every package's have been written: npm is asked again for its `last-week`
+ * window, and only if it is still the one the download-windows step was told is it recorded as theirs. If npm closed a
+ * day in between, some counts may cover the old week and some the new, so none is dated, and none is published.
+ */
+async function dateVersionCounts(
+  db: StatsDatabase,
+  fetcher: Fetcher,
+  log: Logger,
+  npm: NpmDays,
+  today: Day,
+): Promise<void> {
+  const week = await fetchNpmWeek(fetcher, npm.package);
+  if (week.start === npm.lastWeek.start && week.end === npm.lastWeek.end) {
+    await writeNpmWeek(db, week, today);
+    return;
+  }
+  log.warn("npm's last-week window moved while per-version counts were fetched: they are kept undated", {
+    capturedOn: today,
+    probed: `${npm.lastWeek.start}..${npm.lastWeek.end}`,
+    after: `${week.start}..${week.end}`,
+  });
+}
+
+/**
+ * Each source as units of work: fetch, then write, in the order they run. A source that loops over packages does one
+ * step per package, so a package that fails does not redo the ones that wrote. Only daily downloads have a window,
+ * because only they come from a dated historical API, and each package's comes from `plan`, decided before its step
+ * runs; a step that fetched a package's whole history marks it collected. Version downloads run straight after that
+ * decision, so npm has the least time to close a day before they are dated against its answer. Everything is stamped
+ * with `today`, the day it was fetched. The kit's count records `now()` as when it was taken.
  */
 function sources(
   db: StatsDatabase,
@@ -236,8 +305,9 @@ function sources(
   fetcher: Fetcher,
   today: Day,
   packages: readonly string[],
-  windowOf: (name: string) => DownloadWindow,
+  plan: () => WindowPlan,
   now: () => Date,
+  log: Logger,
 ): Record<SourceKey, SourceWork> {
   const perPackage = (run: (name: string) => Promise<number>): SourceWork => ({
     each: packages.map((name) => [name, () => run(name)] as const),
@@ -248,17 +318,21 @@ function sources(
       await writeRegistry(db, name, facts, today);
       return facts.versions.length + 1;
     }),
+    versionDownloads: {
+      ...perPackage(async (name) => {
+        const counts = await fetchVersionDownloads(fetcher, name);
+        await writeVersionDownloads(db, name, counts, today);
+        return Object.keys(counts).length;
+      }),
+      finish: () => dateVersionCounts(db, fetcher, log, plan().npm, today),
+    },
     dailyDownloads: perPackage(async (name) => {
-      const window = windowOf(name);
+      const window = plan().windows[name];
+      if (window === undefined) throw new InternalError({ detail: `No download window was decided for ${name}.` });
       const days = await fetchDailyDownloads(fetcher, name, window);
       await writeDailyDownloads(db, name, days, today);
       if (window.history) await markHistoryCollected(db, name, today);
       return days.length;
-    }),
-    versionDownloads: perPackage(async (name) => {
-      const counts = await fetchVersionDownloads(fetcher, name);
-      await writeVersionDownloads(db, name, counts, today);
-      return Object.keys(counts).length;
     }),
     github: {
       whole: async () => {
@@ -330,7 +404,7 @@ interface SourceOutcome {
 /**
  * Run one source's steps. A per-subject source tries every subject however many fail before it, so one that answers
  * still writes, and its failure names each subject that did not. Only once every subject has written does its
- * completion step run.
+ * completion step run its `finish` and record it complete.
  */
 async function runSource(
   step: CollectStep,
@@ -367,7 +441,10 @@ async function runSource(
   }
   if (failed.length > 0) return { rows, failure: `${name} (${failed.join(", ")})` };
   try {
-    await loggedStep(step, log, name, SOURCE_STEP, () => complete(0));
+    await loggedStep(step, log, name, SOURCE_STEP, async () => {
+      await work.finish?.();
+      return complete(0);
+    });
     return { rows, failure: null };
   } catch {
     return { rows, failure: name };
@@ -384,10 +461,14 @@ async function runSource(
  * sources and packages that did not, so it shows as errored and can be re-run. With the kit's 27 packages that is
  * about 145 steps, well under the runtime's limit per instance.
  *
- * Before daily downloads, one step decides each package's window: a package no step has yet collected in full gets
- * its whole history, from its registry creation day as far back as npm keeps, and keeps getting it on every run
- * until one of its steps writes it. If that step fails, every package gets the usual window, none is marked, and the
- * run fails naming it.
+ * Before version downloads and daily downloads, one step asks npm which day it has last finished counting and decides
+ * each package's daily-downloads window, none reaching past that day: a package no step has yet collected in full gets
+ * its whole history, from its registry creation day as far back as npm keeps, and keeps getting it on every run until
+ * one of its steps writes it; a known package's window reaches back to the day after the newest day held, so the days a
+ * capped or failed run skipped are fetched by the next. If that step fails, neither source runs, so no day npm has not
+ * counted is stored and no per-version count is captured without the week it covers, and the run fails naming all
+ * three. Version downloads run next, and their last step asks npm for its week again, dating them only when it has
+ * not moved.
  *
  * Every request goes through one {@link upstreamFetcher}, which paces npm's downloads API and retries a rate limit
  * in place, and every step that throws logs why through `log` before the runtime retries it.
@@ -423,20 +504,28 @@ export async function runCollect(
   const rows: Record<string, number> = {};
   const failed: string[] = [];
   const completed: string[] = [];
-  const windows: Record<string, DownloadWindow> = {};
-  const usual = downloadWindowFor({ day, today, backfillFrom: backfillFrom(job), pending: false, createdOn: null });
-  const work = sources(db, env, upstream, today, packages, (name) => windows[name] ?? usual, now);
+  let plan: WindowPlan | "failed" | null = null;
+  const planned = (): WindowPlan => {
+    if (plan === null || plan === "failed") throw new InternalError({ detail: "No download windows were decided." });
+    return plan;
+  };
+  const work = sources(db, env, upstream, today, packages, planned, now, log);
   for (const source of Object.keys(work) as SourceKey[]) {
-    if (source === "dailyDownloads") {
-      try {
-        Object.assign(
-          windows,
-          await loggedStep(step, log, DOWNLOAD_WINDOWS, DOWNLOAD_WINDOWS_STEP, () =>
-            planWindows(db, packages, day, today, job),
-          ),
-        );
-      } catch {
-        failed.push(DOWNLOAD_WINDOWS);
+    if (NEEDS_PLAN.has(source)) {
+      if (plan === null) {
+        try {
+          plan = await loggedStep(step, log, DOWNLOAD_WINDOWS, DOWNLOAD_WINDOWS_STEP, () =>
+            planWindows(db, upstream, packages, day, today, job),
+          );
+        } catch {
+          plan = "failed";
+          failed.push(DOWNLOAD_WINDOWS);
+        }
+      }
+      if (plan === "failed") {
+        failed.push(STEPS[source]);
+        rows[STEPS[source]] = 0;
+        continue;
       }
     }
     const outcome = await runSource(step, log, db, source, work[source], now);

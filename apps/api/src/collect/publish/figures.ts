@@ -1,4 +1,4 @@
-import { addDays, type Day, utcDay } from "../day";
+import { addDays, type Day, type DayRange, utcDay } from "../day";
 
 /**
  * The arithmetic the publish step builds its figures with: medians, weekly and daily series, window sums and
@@ -91,11 +91,13 @@ export interface VersionWindow {
 }
 
 /**
- * npm's per-version counts as non-overlapping seven-day windows, newest last. A capture on day C covers the seven
- * days ending the day before it. Starting from the newest capture, each earlier capture is kept only when its
- * window ends before the last kept one starts.
+ * npm's per-version counts as non-overlapping seven-day windows, newest last. A capture on day C covers the week
+ * `weeks` holds for C, which is what npm said its `last-week` covered that day once every count captured then was
+ * known to cover it. A capture with no week there is left out: its counts are real, but which seven days they cover
+ * is not known, and npm does not say again. That includes every capture from before npm was asked. Starting from the
+ * newest dated capture, each earlier one is kept only when its window ends before the last kept one starts.
  */
-export function versionWindows(rows: readonly VersionCapture[]): VersionWindow[] {
+export function versionWindows(rows: readonly VersionCapture[], weeks: ReadonlyMap<Day, DayRange>): VersionWindow[] {
   const byDay = new Map<Day, Record<string, number>>();
   for (const row of rows) {
     const counts = byDay.get(row.capturedOn) ?? {};
@@ -105,11 +107,11 @@ export function versionWindows(rows: readonly VersionCapture[]): VersionWindow[]
   const windows: VersionWindow[] = [];
   let earliestStart: Day | null = null;
   for (const day of [...byDay.keys()].sort().reverse()) {
-    const end = addDays(day, -1);
-    if (earliestStart !== null && end >= earliestStart) continue;
-    const start = addDays(day, -7);
-    windows.push({ start, end, counts: byDay.get(day) ?? {} });
-    earliestStart = start;
+    const week = weeks.get(day);
+    if (week === undefined) continue;
+    if (earliestStart !== null && week.end >= earliestStart) continue;
+    windows.push({ start: week.start, end: week.end, counts: byDay.get(day) ?? {} });
+    earliestStart = week.start;
   }
   return windows.reverse();
 }

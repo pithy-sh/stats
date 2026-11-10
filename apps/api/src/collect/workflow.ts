@@ -8,7 +8,8 @@ import { secretsStore } from "@pithy-sh/secrets/src/secretsStore";
 import { z } from "zod";
 import { type StatsDatabase, statsDatabase } from "../data/tables";
 import { GITHUB_TOKEN, statsSecretRegistry } from "../secret/registry";
-import { Day, downloadWindow, utcDay } from "./day";
+import { Day, utcDay } from "./day";
+import { markHistoryCollected, readHistoryState } from "./history";
 import { countTarball } from "./kit/source";
 import { publish } from "./publish/publish";
 import { loggedStep } from "./step";
@@ -40,6 +41,7 @@ import {
 import { type Fetcher, runtimeFetch } from "./upstream/http";
 import { fetchCdnStats } from "./upstream/jsdelivr";
 import { fetchDailyDownloads, fetchOrgPackages, fetchRegistry, fetchVersionDownloads } from "./upstream/npm";
+import { type DownloadWindow, downloadWindowFor } from "./window";
 
 /** The npm org whose packages are counted. */
 export const KIT_ORG = "pithy-sh";
@@ -117,6 +119,19 @@ export const PUBLISH_STEP = {
   timeout: "5 minutes",
 } as const satisfies WorkflowStepConfig;
 
+/**
+ * The step that decides each package's daily-downloads window, once the registry has run and before any package's
+ * daily-downloads step. Its journalled answer is what every one of those steps fetches, on a replay as on the first
+ * run.
+ */
+export const DOWNLOAD_WINDOWS = "download windows";
+
+/** The download-windows step: a retry reads the same rows again. */
+export const DOWNLOAD_WINDOWS_STEP = {
+  retries: { limit: 3, delay: "30 seconds", backoff: "exponential" },
+  timeout: "1 minute",
+} as const satisfies WorkflowStepConfig;
+
 /** The publish step's name. It runs once every source step has finished, whether or not each succeeded. */
 export const PUBLISH = "publish";
 
@@ -183,26 +198,50 @@ type SourceWork =
 /** The subject of deps.dev's one step that is not a package: the repository's Scorecard. */
 export const SCORECARD_SUBJECT = "scorecard";
 
+/** Where a run's daily downloads reach back to for every package: the kit's first publish in a backfill. */
+function backfillFrom(job: CollectJob): Day | undefined {
+  return job.backfill === true ? FIRST_PUBLISH_DAY : undefined;
+}
+
+/**
+ * Each package's daily-downloads window for this run, from its history state: the whole history for a package no
+ * step has yet collected in full, the usual window for the rest.
+ */
+async function planWindows(
+  db: StatsDatabase,
+  packages: readonly string[],
+  day: Day,
+  today: Day,
+  job: CollectJob,
+): Promise<Record<string, DownloadWindow>> {
+  const states = await readHistoryState(db, packages);
+  return Object.fromEntries(
+    packages.map((name) => {
+      const state = states[name] ?? { pending: false, createdOn: null };
+      return [name, downloadWindowFor({ day, today, backfillFrom: backfillFrom(job), ...state })];
+    }),
+  );
+}
+
 /**
  * Each source as units of work: fetch, then write. A source that loops over packages does one step per package, so
  * a package that fails does not redo the ones that wrote. Only daily downloads read `day`, because only they come
- * from a dated historical API; everything is stamped with `today`, the day it was fetched. The kit's count records
- * `now()` as when it was taken.
+ * from a dated historical API, and each package's window comes from `windowOf`, decided before its step runs; a
+ * step that fetched a package's whole history marks it collected. Everything is stamped with `today`, the day it was
+ * fetched. The kit's count records `now()` as when it was taken.
  */
 function sources(
   db: StatsDatabase,
   env: CollectEnv,
   fetcher: Fetcher,
-  day: Day,
   today: Day,
   packages: readonly string[],
-  job: CollectJob,
+  windowOf: (name: string) => DownloadWindow,
   now: () => Date,
 ): Record<SourceKey, SourceWork> {
   const perPackage = (run: (name: string) => Promise<number>): SourceWork => ({
     each: packages.map((name) => [name, () => run(name)] as const),
   });
-  const window = downloadWindow(day, job.backfill === true ? FIRST_PUBLISH_DAY : undefined);
   return {
     registry: perPackage(async (name) => {
       const facts = await fetchRegistry(fetcher, name);
@@ -210,8 +249,10 @@ function sources(
       return facts.versions.length + 1;
     }),
     dailyDownloads: perPackage(async (name) => {
+      const window = windowOf(name);
       const days = await fetchDailyDownloads(fetcher, name, window);
       await writeDailyDownloads(db, name, days, today);
+      if (window.history) await markHistoryCollected(db, name, today);
       return days.length;
     }),
     versionDownloads: perPackage(async (name) => {
@@ -343,6 +384,11 @@ async function runSource(
  * sources and packages that did not, so it shows as errored and can be re-run. With the kit's 27 packages that is
  * about 145 steps, well under the runtime's limit per instance.
  *
+ * Before daily downloads, one step decides each package's window: a package no step has yet collected in full gets
+ * its whole history, from its registry creation day as far back as npm keeps, and keeps getting it on every run
+ * until one of its steps writes it. If that step fails, every package gets the usual window, none is marked, and the
+ * run fails naming it.
+ *
  * Every request goes through one {@link upstreamFetcher}, which paces npm's downloads API and retries a rate limit
  * in place, and every step that throws logs why through `log` before the runtime retries it.
  *
@@ -377,8 +423,22 @@ export async function runCollect(
   const rows: Record<string, number> = {};
   const failed: string[] = [];
   const completed: string[] = [];
-  const work = sources(db, env, upstream, day, today, packages, job, now);
+  const windows: Record<string, DownloadWindow> = {};
+  const usual = downloadWindowFor({ day, today, backfillFrom: backfillFrom(job), pending: false, createdOn: null });
+  const work = sources(db, env, upstream, today, packages, (name) => windows[name] ?? usual, now);
   for (const source of Object.keys(work) as SourceKey[]) {
+    if (source === "dailyDownloads") {
+      try {
+        Object.assign(
+          windows,
+          await loggedStep(step, log, DOWNLOAD_WINDOWS, DOWNLOAD_WINDOWS_STEP, () =>
+            planWindows(db, packages, day, today, job),
+          ),
+        );
+      } catch {
+        failed.push(DOWNLOAD_WINDOWS);
+      }
+    }
     const outcome = await runSource(step, log, db, source, work[source], now);
     rows[STEPS[source]] = outcome.rows;
     if (outcome.failure === null) completed.push(STEPS[source]);

@@ -23,6 +23,14 @@ async function primaryKey(table: string): Promise<string[]> {
     .map((row) => row.name);
 }
 
+/** Roll back to the schema before 0003: every later migration comes down first. */
+async function rollbackKit(): Promise<void> {
+  for (;;) {
+    const results = await rollbackMigration(env.DB, statsMigrationProvider());
+    if (results.length === 0 || results.some((result) => result.migrationName.endsWith("0003_kit"))) return;
+  }
+}
+
 beforeEach(async () => {
   await freshDatabase(env.DB);
 });
@@ -34,14 +42,14 @@ describe("0003_kit", () => {
   });
 
   test("down removes kit_counts and leaves the schema before it", async () => {
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackKit();
     const present = await tables();
     expect(present).not.toContain("kit_counts");
     expect(present).toContain("collections");
   });
 
   test("up again after down restores it", async () => {
-    await rollbackMigration(env.DB, statsMigrationProvider());
+    await rollbackKit();
     await runMigrations(env.DB, statsMigrationProvider());
     expect(await primaryKey("kit_counts")).toEqual(["repo", "captured_on"]);
   });

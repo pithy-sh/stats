@@ -3,6 +3,7 @@ import {
   env,
   introspectWorkflow,
   introspectWorkflowInstance,
+  type WorkflowInstanceModifier,
   waitOnExecutionContext,
 } from "cloudflare:test";
 import { sql } from "kysely";
@@ -12,6 +13,8 @@ import { Latest, Summary } from "../contract/stats";
 import { statsDatabase, type statsTables } from "../data/tables";
 import { freshDatabase } from "../data/testing";
 import worker from "../index";
+import { addDays, dayRanges } from "./day";
+import { markHistoryCollected } from "./history";
 import { gzip, tarArchive } from "./kit/testing";
 import {
   recordCollected,
@@ -23,12 +26,15 @@ import {
   writeRepo,
   writeVersionDownloads,
 } from "./store";
-import { NPM_API_GAP_MS } from "./upstream/npm";
+import { MAX_RANGE_DAYS, NPM_API_GAP_MS } from "./upstream/npm";
 import { clock } from "./upstream/rateLimit";
 import { type StubAnswer, type StubCall, stubFetch } from "./upstream/testing";
-import { COLLECT_CRON } from "./workflow";
+import { npmHistoryStart } from "./window";
+import { COLLECT_CRON, DOWNLOAD_WINDOWS } from "./workflow";
 
 const PACKAGES = ["@pithy-sh/auth", "@pithy-sh/core"];
+/** The day every test's {@link PACKAGES} were first seen and had their history collected: they are known. */
+const KNOWN_SINCE = "2026-09-05";
 const TOKEN = "test-github-token";
 /** The head of the kit's `main` the stub answers, and the commit whose tarball it serves. */
 const HEAD = "c".repeat(40);
@@ -289,6 +295,8 @@ async function rowCounts(): Promise<Record<string, number>> {
 
 beforeEach(async () => {
   await freshDatabase(env.DB);
+  await recordPackages(db(), PACKAGES, KNOWN_SINCE);
+  for (const name of PACKAGES) await markHistoryCollected(db(), name, KNOWN_SINCE);
 });
 
 afterEach(() => {
@@ -428,7 +436,6 @@ describe("a run's day and the day it captures", () => {
   test("re-running an earlier date refills its daily downloads and leaves its snapshots as they were", async () => {
     const earlier = "2026-11-05";
     const core = "@pithy-sh/core";
-    await recordPackages(db(), PACKAGES, earlier);
     await writeVersionDownloads(db(), core, { "0.1.0": 1, "0.2.0": 2 }, earlier);
     await writeRegistry(
       db(),
@@ -494,7 +501,7 @@ describe("a run's day and the day it captures", () => {
       { capturedOn: output.capturedOn, stars: 500 },
     ]);
     const packages = await db().selectFrom("packages").select(["firstSeenOn", "lastSeenOn"]).execute();
-    for (const row of packages) expect(row).toEqual({ firstSeenOn: earlier, lastSeenOn: output.capturedOn });
+    for (const row of packages) expect(row).toEqual({ firstSeenOn: KNOWN_SINCE, lastSeenOn: output.capturedOn });
   });
 
   test("the cron starts a run for the day it fires on", async () => {
@@ -892,5 +899,161 @@ describe("the publish step", () => {
     expect(twice.headers.get("cache-control")).not.toContain("immutable");
     expect(twice.headers.get("etag")).not.toBe(once.headers.get("etag"));
     expect(Latest.parse(await twice.json()).github.stars).toBe(77);
+  });
+});
+
+// Each test runs up to four instances in turn, so it gets more than the default five seconds.
+describe("a newly seen package", { timeout: 30_000 }, () => {
+  const FRESH = "@pithy-sh/fresh";
+  const RANGES = "https://api.npmjs.org/downloads/range/";
+  /** A package moved into the org with years of downloads behind it: older than npm's history. */
+  const FRESH_CREATED = "2019-01-01T00:00:00Z";
+
+  /** The org list holds {@link FRESH} beside {@link PACKAGES}, and the registry dates it {@link FRESH_CREATED}. */
+  const withFresh = (overrides: Record<string, StubAnswer | ((call: StubCall) => StubAnswer)> = {}) =>
+    upstreamsWith({
+      "https://registry.npmjs.org/-/org/pithy-sh/package": {
+        json: Object.fromEntries([...PACKAGES, FRESH].map((name) => [name, "write"])),
+      },
+      "https://registry.npmjs.org/@pithy-sh%2Ffresh": {
+        json: {
+          "dist-tags": { latest: "1.0.0" },
+          time: { created: FRESH_CREATED, "1.0.0": FRESH_CREATED },
+          versions: { "1.0.0": { dist: {} } },
+        },
+      },
+      ...overrides,
+    });
+
+  /** Every daily-downloads URL the stub was asked for, of one package. */
+  const rangesOf = (stub: ReturnType<typeof stubFetch>, name: string) =>
+    stub.calls.filter((call) => call.url.startsWith(RANGES) && call.url.endsWith(`/${name}`)).map((call) => call.url);
+
+  /** The URLs a package's whole history is fetched with on a run on `capturedOn`: clamped, then cut per request. */
+  const historyUrls = (capturedOn: string, name: string) =>
+    dayRanges(npmHistoryStart(capturedOn), addDays(capturedOn, -1), MAX_RANGE_DAYS).map(
+      ({ start, end }) => `${RANGES}${start}:${end}/${name}`,
+    );
+
+  const markOf = async (name: string) =>
+    (await db().selectFrom("packages").select("historyCollectedOn").where("name", "=", name).executeTakeFirst())
+      ?.historyCollectedOn;
+
+  /**
+   * One run for 2026-11-09 against `stub`, with retry delays off. `errored` expects it to fail, and answers its
+   * message; `modify` changes the instance first.
+   */
+  async function run(
+    id: string,
+    stub: ReturnType<typeof stubFetch>,
+    options: { errored?: boolean; modify?: (m: WorkflowInstanceModifier) => Promise<void> } = {},
+  ): Promise<string | null> {
+    vi.restoreAllMocks();
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, id);
+    await instance.modify(async (m) => {
+      await m.disableRetryDelays();
+      await options.modify?.(m);
+    });
+    await env.COLLECT.create({ id, params: { date: "2026-11-09" } });
+    if (options.errored !== true) {
+      await instance.waitForStatus("complete");
+      return null;
+    }
+    await instance.waitForStatus("errored");
+    return (await instance.getError()).message;
+  }
+
+  test("its first run fetches its whole history, clamped to npm's and cut per request, while known packages fetch three days", async () => {
+    const stub = withFresh();
+    stubUpstreams(stub);
+    await using instance = await introspectWorkflowInstance(env.COLLECT, "fresh");
+    await env.COLLECT.create({ id: "fresh", params: { date: "2026-11-09" } });
+    await instance.waitForStatus("complete");
+    const { capturedOn } = (await instance.getOutput()) as { capturedOn: string };
+
+    const history = historyUrls(capturedOn, FRESH);
+    expect(history.length).toBe(2);
+    expect(rangesOf(stub, FRESH)).toEqual(history);
+    for (const name of PACKAGES) expect(rangesOf(stub, name)).toEqual([`${RANGES}2026-11-06:2026-11-08/${name}`]);
+
+    // The window was decided in its own step, before any package's step ran, and is journalled there.
+    expect(await instance.waitForStepResult({ name: DOWNLOAD_WINDOWS })).toEqual({
+      "@pithy-sh/auth": { start: "2026-11-06", end: "2026-11-08", history: false },
+      "@pithy-sh/core": { start: "2026-11-06", end: "2026-11-08", history: false },
+      [FRESH]: { start: npmHistoryStart(capturedOn), end: addDays(capturedOn, -1), history: true },
+    });
+    const days = await db().selectFrom("dailyDownloads").select("day").where("packageName", "=", FRESH).execute();
+    expect(days[0]?.day).toBe(npmHistoryStart(capturedOn));
+    expect(await markOf(FRESH)).toBe(capturedOn);
+    for (const name of PACKAGES) expect(await markOf(name)).toBe(KNOWN_SINCE);
+
+    vi.restoreAllMocks();
+    const next = withFresh();
+    stubUpstreams(next);
+    await using second = await introspectWorkflowInstance(env.COLLECT, "fresh-next");
+    await env.COLLECT.create({ id: "fresh-next", params: { date: "2026-11-09" } });
+    await second.waitForStatus("complete");
+    expect(rangesOf(next, FRESH)).toEqual([`${RANGES}2026-11-06:2026-11-08/${FRESH}`]);
+  });
+
+  test("a first-sight step that fails keeps the whole window for the next run, until one succeeds", async () => {
+    const down = (call: StubCall): StubAnswer => (call.url.endsWith(`/${FRESH}`) ? { status: 503 } : { status: 599 });
+
+    const first = await run("fresh-down", withFresh({ [`${RANGES}*`]: down }), { errored: true });
+    expect(first).toContain(`daily downloads (${FRESH})`);
+    expect(await markOf(FRESH)).toBeNull();
+
+    const again = withFresh({ [`${RANGES}*`]: down });
+    const second = await run("fresh-down-again", again, { errored: true });
+    expect(second).toContain(`daily downloads (${FRESH})`);
+    const capturedOn = await db()
+      .selectFrom("packages")
+      .select("lastSeenOn")
+      .where("name", "=", FRESH)
+      .executeTakeFirstOrThrow();
+    // Each attempt starts from the far end of the history again, and fails on its first request.
+    expect(new Set(rangesOf(again, FRESH))).toEqual(new Set([historyUrls(capturedOn.lastSeenOn, FRESH)[0]]));
+    expect(await markOf(FRESH)).toBeNull();
+
+    const healthy = withFresh();
+    await run("fresh-up", healthy);
+    expect(rangesOf(healthy, FRESH)).toEqual(historyUrls(capturedOn.lastSeenOn, FRESH));
+    expect(await markOf(FRESH)).toBe(capturedOn.lastSeenOn);
+
+    const after = withFresh();
+    await run("fresh-known", after);
+    expect(rangesOf(after, FRESH)).toEqual([`${RANGES}2026-11-06:2026-11-08/${FRESH}`]);
+  });
+
+  test("a package whose registry step failed waits for a run that knows its creation day", async () => {
+    const noRegistry = withFresh({ "https://registry.npmjs.org/@pithy-sh%2Ffresh": { status: 500 } });
+    const first = await run("fresh-no-registry", noRegistry, { errored: true });
+    expect(first).toContain(`registry (${FRESH})`);
+    expect(rangesOf(noRegistry, FRESH)).toEqual([`${RANGES}2026-11-06:2026-11-08/${FRESH}`]);
+    expect(await markOf(FRESH)).toBeNull();
+
+    const healthy = withFresh();
+    await run("fresh-registry-back", healthy);
+    const { lastSeenOn } = await db()
+      .selectFrom("packages")
+      .select("lastSeenOn")
+      .where("name", "=", FRESH)
+      .executeTakeFirstOrThrow();
+    expect(rangesOf(healthy, FRESH)).toEqual(historyUrls(lastSeenOn, FRESH));
+    expect(await markOf(FRESH)).toBe(lastSeenOn);
+  });
+
+  test("when the windows cannot be read, every package fetches three days, none is marked, and the run names the step", async () => {
+    const stub = withFresh();
+    const error = await run("no-windows", stub, {
+      errored: true,
+      modify: (m) => m.mockStepError({ name: DOWNLOAD_WINDOWS }, new Error("D1 is down")),
+    });
+    expect(error).toContain(DOWNLOAD_WINDOWS);
+    for (const name of [...PACKAGES, FRESH]) {
+      expect(rangesOf(stub, name)).toEqual([`${RANGES}2026-11-06:2026-11-08/${name}`]);
+    }
+    expect(await markOf(FRESH)).toBeNull();
   });
 });

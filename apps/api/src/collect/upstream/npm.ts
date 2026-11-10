@@ -14,7 +14,10 @@ export const NPM_API_HOST = "api.npmjs.org";
 export const NPM_API_GAP_MS = 4000;
 
 /** npm's downloads API serves at most eighteen months per request; a year keeps well inside it. */
-const MAX_RANGE_DAYS = 365;
+export const MAX_RANGE_DAYS = 365;
+
+/** How many months back npm's downloads API keeps daily counts. A package's history is fetched from no earlier. */
+export const NPM_HISTORY_MONTHS = 18;
 
 /** A package name as a URL path segment, with a scope's slash encoded the way the registry wants it. */
 function encodedName(name: string): string {

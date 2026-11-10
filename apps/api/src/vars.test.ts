@@ -18,29 +18,39 @@ describe("READY_AFTER_MINUTES", () => {
     expect(VARS.read({ READY_AFTER_MINUTES: 1439 }).READY_AFTER_MINUTES).toBe(1439);
   });
 
-  // The kit reads text that the schema refuses once more as JSON, so any JSON spelling of a valid number is taken.
-  for (const [raw, minutes] of [
-    [" 15", 15],
-    ["15 ", 15],
-    ["\t15\n", 15],
-    ["1e1", 10],
-    ["15.0", 15],
-  ] as const) {
-    test(`reads ${JSON.stringify(raw)}, a JSON spelling of ${minutes}, as ${minutes} minutes`, () => {
-      expect(VARS.read({ READY_AFTER_MINUTES: raw }).READY_AFTER_MINUTES).toBe(minutes);
-      expect(parseVar(entry, raw)).toEqual({ ok: true, value: minutes });
+  test("reads a plain decimal written as text, a fraction of zero included, as that number", () => {
+    expect(parseVar(entry, "20")).toEqual({ ok: true, value: 20 });
+    expect(parseVar(entry, "15.0")).toEqual({ ok: true, value: 15 });
+    expect(VARS.read({ READY_AFTER_MINUTES: "15.0" }).READY_AFTER_MINUTES).toBe(15);
+  });
+
+  // Text is a number only as a plain decimal: padding, an exponent or a hex prefix is a typo, not another spelling.
+  for (const raw of [" 15", "15 ", "\t15\n", "1e1", "0x10", ""]) {
+    test(`falls back to the default for ${JSON.stringify(raw)}, which is not a plain decimal`, () => {
+      expect(VARS.read({ READY_AFTER_MINUTES: raw }).READY_AFTER_MINUTES).toBe(DEFAULT_READY_AFTER_MINUTES);
+      expect(parseVar(entry, raw).ok).toBe(false);
     });
   }
+
+  test("tells onFallback which value fell back and why, and nothing for a valid one", () => {
+    const fallbacks: unknown[] = [];
+    VARS.read({ READY_AFTER_MINUTES: "20" }, { onFallback: (fallback) => fallbacks.push(fallback) });
+    expect(fallbacks).toEqual([]);
+    VARS.read({ READY_AFTER_MINUTES: "1e1" }, { onFallback: (fallback) => fallbacks.push(fallback) });
+    VARS.read({}, { onFallback: (fallback) => fallbacks.push(fallback) });
+    expect(fallbacks).toMatchObject([
+      { name: "READY_AFTER_MINUTES", raw: "1e1", reason: "invalid" },
+      { name: "READY_AFTER_MINUTES", raw: undefined, reason: "missing" },
+    ]);
+  });
 
   for (const raw of [
     undefined,
     null,
-    "",
     " ",
     "abc",
     "1.5",
     "15m",
-    "0x10",
     "1e-1",
     "15,0",
     "-5",

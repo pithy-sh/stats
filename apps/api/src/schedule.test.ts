@@ -97,32 +97,56 @@ describe("scheduleReader", () => {
     expect(warnings).toHaveLength(0);
   });
 
-  test("takes any JSON spelling of a valid number, surrounding whitespace included, without logging", () => {
+  test("takes a plain decimal written as text, without logging", () => {
     const { log, warnings } = recordingLogger();
     const read = scheduleReader();
-    expect(read({ READY_AFTER_MINUTES: " 15" }, log).readyAfterMs).toBe(15 * MINUTE);
-    expect(read({ READY_AFTER_MINUTES: "15 " }, log).readyAfterMs).toBe(15 * MINUTE);
-    expect(read({ READY_AFTER_MINUTES: "1e1" }, log).readyAfterMs).toBe(10 * MINUTE);
+    expect(read({ READY_AFTER_MINUTES: "20" }, log).readyAfterMs).toBe(20 * MINUTE);
     expect(read({ READY_AFTER_MINUTES: "15.0" }, log).readyAfterMs).toBe(15 * MINUTE);
     expect(warnings).toHaveLength(0);
   });
 
-  for (const raw of ["abc", "1.5", "15m", "-5", "1440", "1e4"]) {
-    test(`falls back to the default for ${JSON.stringify(raw)}, naming the value it ignored`, () => {
+  for (const raw of [" 15", "15 ", "1e1", "0x10", "", "abc", "1.5", "15m", "-5", "1440", "1e4"]) {
+    test(`falls back to the default for ${JSON.stringify(raw)}, naming the value it ignored and why`, () => {
       const { log, warnings } = recordingLogger();
       expect(scheduleReader()({ READY_AFTER_MINUTES: raw }, log)).toEqual(DEFAULT);
       expect(warnings).toHaveLength(1);
-      expect(warnings[0]?.[1]).toMatchObject({ value: raw, fallback: 15 });
+      expect(warnings[0]?.[1]).toMatchObject({
+        value: raw,
+        reason: "invalid",
+        problem: expect.any(String),
+        fallback: 15,
+      });
     });
   }
 
-  test("logs an invalid value once, however many times it is read", () => {
+  test("names an unset var as missing", () => {
+    const { log, warnings } = recordingLogger();
+    scheduleReader()({}, log);
+    expect(warnings[0]?.[1]).toMatchObject({ value: "unset", reason: "missing", problem: "missing", fallback: 15 });
+  });
+
+  test("logs each fallen-back value once, however many times or through however many env objects it is read", () => {
     const { log, warnings } = recordingLogger();
     const read = scheduleReader();
-    for (let i = 0; i < 5; i += 1) read({ READY_AFTER_MINUTES: "nope" }, log);
+    const env = { READY_AFTER_MINUTES: "nope" };
+    for (let i = 0; i < 3; i += 1) read(env, log);
+    for (let i = 0; i < 3; i += 1) read({ READY_AFTER_MINUTES: "nope" }, log);
+    read({ READY_AFTER_MINUTES: "1e1" }, log);
+    read({ READY_AFTER_MINUTES: "1e1" }, log);
     read({}, log);
     read({}, log);
-    expect(warnings).toHaveLength(2);
+    read({ READY_AFTER_MINUTES: "20" }, log);
+    expect(warnings.map(([, fields]) => (fields as { value: string }).value)).toEqual(["nope", "1e1", "unset"]);
+  });
+
+  test("keeps its own record of what it warned about, apart from any other reader", () => {
+    const first = recordingLogger();
+    const second = recordingLogger();
+    const env = { READY_AFTER_MINUTES: "nope" };
+    scheduleReader()(env, first.log);
+    scheduleReader()(env, second.log);
+    expect(first.warnings).toHaveLength(1);
+    expect(second.warnings).toHaveLength(1);
   });
 
   test("never throws, whatever the env holds", () => {

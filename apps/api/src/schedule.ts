@@ -1,6 +1,6 @@
 import { InternalError } from "@pithy-sh/core/src/error/pithyError";
 import type { Logger } from "@pithy-sh/core/src/logger/logger";
-import { parseVar } from "@pithy-sh/core/src/worker/vars";
+import type { VarFallback } from "@pithy-sh/core/src/worker/vars";
 import { DEFAULT_READY_AFTER_MINUTES, VARS } from "./vars";
 
 /**
@@ -31,8 +31,8 @@ export interface Schedule {
 /** What the schedule reads off the Worker env. */
 export interface ScheduleEnv {
   /**
-   * Whole minutes from a run's start to the time its files are taken to be ready, as a number or as text. Text is read
-   * as JSON, so `" 15"`, `"15.0"` and `"1e1"` are taken as well as `"15"`.
+   * Whole minutes from a run's start to the time its files are taken to be ready, as a number or as text. Text is taken
+   * only as a plain decimal, so `"15"` and `"15.0"` read as 15 while `" 15"`, `"1e1"`, `"0x10"` and `""` fall back.
    */
   READY_AFTER_MINUTES?: unknown;
 }
@@ -82,27 +82,29 @@ function describeRaw(raw: unknown): string {
 }
 
 /**
- * A reader of the {@link Schedule} off the Worker env, through {@link VARS}. `READY_AFTER_MINUTES` parses as a number,
- * or as text whose JSON is one, so surrounding whitespace, `15.0` and `1e1` are taken. A value that does not parse
- * falls back to {@link DEFAULT_READY_AFTER_MINUTES} and is logged as a warning the first time this reader sees that
- * value, never again, so a request never fails on it and a busy Worker does not log it on every request.
+ * A reader of the {@link Schedule} off the Worker env, through {@link VARS}. A `READY_AFTER_MINUTES` that is missing or
+ * does not parse falls back to {@link DEFAULT_READY_AFTER_MINUTES}, as `VARS.read` hands it back, and its `onFallback`
+ * report is logged as a warning the first time this reader sees that value, never again, so a request never fails on
+ * it and a busy Worker does not log it on every request.
  */
 export function scheduleReader(cron: string = COLLECT_CRON): (env: ScheduleEnv, log: Logger) => Schedule {
   const runStartMs = dailyRunStart(cron);
   const warned = new Set<string>();
   return (env, log) => {
-    const raw = env.READY_AFTER_MINUTES;
-    if (!parseVar(VARS.vars.READY_AFTER_MINUTES, raw).ok) {
+    const onFallback = ({ name, raw, reason, problem }: VarFallback) => {
       const value = describeRaw(raw);
-      if (!warned.has(value)) {
-        warned.add(value);
-        log.warn("READY_AFTER_MINUTES is not a whole number of minutes under a day; using the default.", {
-          value,
-          fallback: DEFAULT_READY_AFTER_MINUTES,
-        });
-      }
-    }
-    return { runStartMs, readyAfterMs: VARS.read(env).READY_AFTER_MINUTES * MS_PER_MINUTE };
+      const key = `${name}=${reason}:${value}`;
+      if (warned.has(key)) return;
+      warned.add(key);
+      const why = reason === "missing" ? "is unset" : "is not a whole number of minutes under a day";
+      log.warn(`${name} ${why}; using the default.`, {
+        value,
+        reason,
+        problem,
+        fallback: DEFAULT_READY_AFTER_MINUTES,
+      });
+    };
+    return { runStartMs, readyAfterMs: VARS.read(env, { onFallback }).READY_AFTER_MINUTES * MS_PER_MINUTE };
   };
 }
 

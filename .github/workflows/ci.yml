@@ -1,6 +1,7 @@
 name: CI
 
-# The card's three gates, on every pull request and every push to main, so a required Gates check always reports.
+# The card's three gates and `pithy doctor`, on every pull request and every push to main, so a required Gates check always
+# reports.
 on:
   push:
     branches: [main]
@@ -38,6 +39,16 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck
+
+      # Doctor reads the local dev database's migration ledger, so setup migrates it first. No Cloudflare credentials
+      # are set here: setup stays local, and doctor skips every staging and prod check that needs the account.
+      - name: Local backend
+        run: bun run pithy setup --skip-install
+
+      # `--offline` makes no network call, so a new kit release on npm cannot turn this red. It still fails on a
+      # wrangler.jsonc stanza that drops a declared var or holds one its schema refuses.
+      - name: Doctor
+        run: bun run pithy doctor --offline
 
       # Both projects: node, and workers, which runs the collector Workflow in workerd against a real D1.
       - name: Test

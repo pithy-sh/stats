@@ -29,7 +29,7 @@ bunx biome check .
 bun run test
 ```
 
-CI runs the same three after `bun install --frozen-lockfile`, on every pull request and every push to `main` (`.github/workflows/ci.yml`), with `bun run pithy setup --skip-install` and `bun run pithy doctor --offline` between typecheck and test, and no Cloudflare credentials, so a `wrangler.jsonc` stanza that drops a declared var, or holds a value its schema refuses, fails CI. Setup is there because doctor fails on a dev database with pending migrations, and a fresh checkout has none applied.
+CI runs the same three after `bun install --frozen-lockfile`, on every pull request and every push to `main` (`.github/workflows/ci.yml`), with `bun run pithy doctor --offline` between typecheck and test, and no Cloudflare credentials, so a `wrangler.jsonc` stanza that drops a declared var, or holds a value its schema refuses, fails CI. Doctor reports a checkout with no local dev database as not set up and passes it, so CI needs no `pithy setup` step.
 
 ## Work
 

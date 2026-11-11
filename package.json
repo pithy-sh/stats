@@ -23,7 +23,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.8",
     "@cloudflare/vitest-plugin": "1.4.2",
-    "@pithy-sh/cli": "^0.27.0",
+    "@pithy-sh/cli": "^0.27.1",
     "@pithy-sh/secrets": "^0.6.11",
     "@types/node": "^22.15.0",
     "typescript": "^7.0.2",

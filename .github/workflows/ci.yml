@@ -40,13 +40,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      # Doctor reads the local dev database's migration ledger, so setup migrates it first. No Cloudflare credentials
-      # are set here: setup stays local, and doctor skips every staging and prod check that needs the account.
-      - name: Local backend
-        run: bun run pithy setup --skip-install
-
-      # `--offline` makes no network call, so a new kit release on npm cannot turn this red. It still fails on a
-      # wrangler.jsonc stanza that drops a declared var or holds one its schema refuses.
+      # `--offline` makes no network call and needs no Cloudflare credentials, so a new kit release on npm cannot
+      # turn this red. A checkout with no local dev database is reported as not set up and passes. It still fails on
+      # a wrangler.jsonc stanza that drops a declared var or holds one its schema refuses.
       - name: Doctor
         run: bun run pithy doctor --offline
 
